@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MarbleBot — Robot Transformer Game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #0a0e1a; font-family: 'Segoe UI', Arial, sans-serif; color: #fff; }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; top: 12px; left: 12px;
+    background: rgba(10, 15, 30, .75); border: 1px solid #3a4a7a; border-radius: 10px;
+    padding: 12px 16px; font-size: 15px; line-height: 1.7; pointer-events: none;
+    text-shadow: 0 1px 2px #000;
+  }
+  #hud b { color: #6cf; }
+  #marbleBalance { color: #fc6; font-weight: bold; }
+  #modeLabel { font-weight: bold; }
+  .robot-mode { color: #6cf; }
+  .car-mode { color: #fc6; }
+
+  #walletChip {
+    position: fixed; top: 12px; right: 12px;
+    background: rgba(10, 15, 30, .75); border: 1px solid #3a4a7a; border-radius: 10px;
+    padding: 8px 14px; font-size: 13px; color: #9ab; pointer-events: none;
+  }
+  #walletChip b { color: #6cf; }
+
+  #shopBtn {
+    position: fixed; top: 54px; right: 12px; z-index: 5;
+    background: rgba(10, 15, 30, .85); border: 1px solid #3a4a7a; border-radius: 10px;
+    padding: 8px 16px; font-size: 15px; color: #fff; cursor: pointer;
+  }
+  #shopBtn:hover { background: #223055; border-color: #6cf; }
+
+  .overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(5, 8, 18, .88); z-index: 10;
+  }
+  #shopOverlay { z-index: 20; display: none; }
+  .panel {
+    background: #101830; border: 1px solid #3a4a7a; border-radius: 14px;
+    padding: 28px 36px; text-align: center; max-width: 480px; width: 92%;
+    box-shadow: 0 0 40px rgba(80, 140, 255, .25);
+    max-height: 92vh; overflow-y: auto;
+  }
+  .panel h1 { color: #6cf; margin-bottom: 6px; font-size: 26px; }
+  .panel p.sub { color: #9ab; margin-bottom: 18px; font-size: 14px; }
+  .panel button {
+    width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer;
+    font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #fff;
+  }
+  #walletBtn { background: linear-gradient(135deg, #9945ff, #14f195); }
+  #walletBtn:hover { filter: brightness(1.15); }
+  #walletBtn:disabled { opacity: .5; cursor: wait; }
+  #guestBtn { background: #1a2440; border: 1px solid #3a4a7a !important; font-weight: normal; font-size: 13px; }
+  #guestBtn:hover { background: #223055; }
+  #statusMsg { color: #fc6; font-size: 13px; min-height: 18px; margin-bottom: 8px; }
+  #statusMsg.err { color: #ff6b7d; }
+  .controls { color: #9ab; font-size: 13px; margin-top: 8px; line-height: 1.8; }
+  kbd {
+    background: #1a2440; border: 1px solid #3a4a7a; border-radius: 4px;
+    padding: 1px 7px; font-family: monospace; font-size: 12px;
+  }
+
+  #board { margin-top: 16px; text-align: left; display: none; }
+  #board h2 { color: #fc6; font-size: 16px; margin-bottom: 8px; text-align: center; }
+  #board table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  #board td, #board th { padding: 4px 8px; border-bottom: 1px solid #223; }
+  #board th { color: #9ab; font-weight: normal; }
+  #board td:last-child, #board th:last-child { text-align: right; }
+  #board tr.me td { color: #fc6; font-weight: bold; }
+  .ticker { color: #fc6; font-size: 11px; }
+
+  /* Shop */
+  .shop-item {
+    display: flex; align-items: center; gap: 12px; text-align: left;
+    background: #0a0e1a; border: 1px solid #2a3a6a; border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 10px;
+  }
+  .shop-item.equipped-item { border-color: #3a6ea5; box-shadow: 0 0 12px rgba(80,140,255,.2); }
+  .shop-item .icon { font-size: 30px; }
+  .shop-item .info { flex: 1; min-width: 0; }
+  .shop-item .name { font-weight: bold; font-size: 15px; }
+  .shop-item .desc { color: #9ab; font-size: 12px; margin: 2px 0 6px; }
+  .badge {
+    display: inline-block; font-size: 10px; font-weight: bold; letter-spacing: .5px;
+    padding: 2px 8px; border-radius: 10px;
+  }
+  .badge.owned { background: #10301a; color: #6f6; border: 1px solid #2e7d32; }
+  .badge.locked { background: #301015; color: #f88; border: 1px solid #c62828; }
+  .badge.equipped { background: #12233f; color: #6cf; border: 1px solid #3a6ea5; }
+  .shop-item button {
+    width: auto; padding: 8px 14px; margin: 0; font-size: 13px; white-space: nowrap;
+    background: linear-gradient(135deg, #3a6ea5, #6cf);
+  }
+  .shop-item button.equip { background: #1a2440; border: 1px solid #3a4a7a; }
+  .shop-item button:disabled { opacity: .45; cursor: default; filter: none; }
+  #closeShopBtn { background: #1a2440; border: 1px solid #3a4a7a; margin-top: 4px; }
+  #closeShopBtn:hover { background: #223055; }
+
+  /* Toasts */
+  #toasts {
+    position: fixed; bottom: 16px; right: 16px; z-index: 100;
+    display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+  }
+  .toast {
+    padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: 340px;
+    background: #1a2440; border: 1px solid #3a4a7a; box-shadow: 0 4px 16px rgba(0,0,0,.5);
+    animation: toastIn .25s ease-out;
+  }
+  .toast.success { background: #10301a; border-color: #2e7d32; }
+  .toast.error { background: #301015; border-color: #c62828; }
+  .toast.info { background: #12233f; border-color: #3a6ea5; }
+  .toast.out { opacity: 0; transition: opacity .4s; }
+  @keyframes toastIn { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  🏆 Score: <b id="score">0</b><br>
+  ⏱ Time: <b id="time">60</b>s<br>
+  🤖 Mode: <span id="modeLabel" class="robot-mode">ROBOT</span><br>
+  💰 <span id="marbleBalance">— $MARBLE</span>
+</div>
+
+<div id="walletChip">🔌 not connected</div>
+<button id="shopBtn">🛒 Shop</button>
+<div id="toasts"></div>
+
+<div class="overlay" id="mainOverlay">
+  <div class="panel">
+    <h1>🤖 MarbleBot</h1>
+    <p class="sub">Collect marbles, earn <b style="color:#fc6">$MARBLE</b> on the IPFPS leaderboard!</p>
+    <div id="statusMsg"></div>
+    <button id="walletBtn">🔌 Connect Solana Wallet</button>
+    <button id="guestBtn">Play as guest (local only, no $MARBLE)</button>
+    <div class="controls">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd> — move<br>
+      <kbd>Q</kbd> — transform (Robot ⇄ Car, car is much faster!)
+    </div>
+    <div id="board"><h2>🏆 Leaderboard <span class="ticker">$MARBLE</span></h2><table id="boardTable"></table></div>
+  </div>
+</div>
+
+<div class="overlay" id="shopOverlay">
+  <div class="panel">
+    <h1>🛒 Transformer Shop</h1>
+    <p class="sub">Spend <b style="color:#fc6">$MARBLE</b> to unlock new robot forms</p>
+    <div id="shopItems">Loading…</div>
+    <button id="closeShopBtn">Close</button>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- Toasts ----------
+function toast(msg, type = 'info', ms = 4000) {
+  const box = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 450);
+  }, ms);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---------- Scene setup ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0e1a);
+scene.fog = new THREE.Fog(0x0a0e1a, 30, 70);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0x8899cc, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(10, 20, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -35; sun.shadow.camera.right = 35;
+sun.shadow.camera.top = 35; sun.shadow.camera.bottom = -35;
+scene.add(sun);
+
+// Ground
+const ARENA = 28;
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(ARENA * 2 + 8, ARENA * 2 + 8),
+  new THREE.MeshStandardMaterial({ color: 0x16213e })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const grid = new THREE.GridHelper(ARENA * 2, 28, 0x3a4a7a, 0x223055);
+grid.position.y = 0.01;
+scene.add(grid);
+
+// Decorative obstacles
+const boxMat = new THREE.MeshStandardMaterial({ color: 0x2a3a6a });
+[[-8, -6, 3], [10, 4, 4], [-4, 12, 2.5], [14, -12, 3], [-16, 6, 2]].forEach(([x, z, s]) => {
+  const b = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), boxMat);
+  b.position.set(x, s / 2, z);
+  b.castShadow = b.receiveShadow = true;
+  scene.add(b);
+});
+
+// ---------- The Robot (transformer) ----------
+const robot = new THREE.Group();
+scene.add(robot);
+
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x4a90e2, metalness: .5, roughness: .4 });
+const darkMat = new THREE.MeshStandardMaterial({ color: 0x22304f, metalness: .6, roughness: .5 });
+const accentMat = new THREE.MeshStandardMaterial({ color: 0xff7043, metalness: .5, roughness: .4 });
+const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: .9 });
+
+// Skins — shop unlockables
+const SKINS = {
+  standard: { label: 'Standard Transformer', icon: '🤖', body: 0x4a90e2, dark: 0x22304f, accent: 0xff7043 },
+  inferno:  { label: 'Inferno Transformer', icon: '🔥', body: 0xd32f2f, dark: 0x4a1414, accent: 0xffc107 },
+};
+let currentSkin = 'standard';
+
+function skinKey() { return 'marblebot_skin_' + (walletAddress || 'guest'); }
+
+function applySkin(name) {
+  const s = SKINS[name] || SKINS.standard;
+  bodyMat.color.set(s.body);
+  darkMat.color.set(s.dark);
+  accentMat.color.set(s.accent);
+  currentSkin = name;
+  try { localStorage.setItem(skinKey(), name); } catch {}
+}
+
+function part(geo, mat, parent = robot) {
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  parent.add(m);
+  return m;
+}
+
+const torso = part(new THREE.BoxGeometry(1.4, 1.6, 0.9), bodyMat);
+const chest = part(new THREE.BoxGeometry(0.9, 0.5, 0.15), accentMat, torso);
+chest.position.set(0, 0.2, 0.5);
+
+const head = part(new THREE.BoxGeometry(0.7, 0.6, 0.6), darkMat);
+const eye = part(new THREE.BoxGeometry(0.5, 0.12, 0.1),
+  new THREE.MeshStandardMaterial({ color: 0x66ffcc, emissive: 0x33ffaa, emissiveIntensity: 1.5 }), head);
+eye.position.set(0, 0.05, 0.32);
+
+function makeArm(side) {
+  const pivot = new THREE.Group();
+  pivot.position.set(side * 0.95, 0.55, 0);
+  torso.add(pivot);
+  const arm = part(new THREE.BoxGeometry(0.4, 1.4, 0.4), bodyMat, pivot);
+  arm.position.y = -0.7;
+  const fist = part(new THREE.BoxGeometry(0.45, 0.35, 0.45), accentMat, pivot);
+  fist.position.y = -1.45;
+  return pivot;
+}
+const armL = makeArm(-1), armR = makeArm(1);
+
+function makeLeg(side) {
+  const pivot = new THREE.Group();
+  pivot.position.set(side * 0.35, -0.8, 0);
+  torso.add(pivot);
+  const leg = part(new THREE.BoxGeometry(0.45, 1.5, 0.45), darkMat, pivot);
+  leg.position.y = -0.75;
+  const foot = part(new THREE.BoxGeometry(0.5, 0.25, 0.7), accentMat, pivot);
+  foot.position.set(0, -1.5, 0.1);
+  return pivot;
+}
+const legL = makeLeg(-1), legR = makeLeg(1);
+
+const wheels = [];
+[[-0.85, 0.85], [0.85, 0.85], [-0.85, -0.85], [0.85, -0.85]].forEach(([x, z]) => {
+  const w = part(new THREE.CylinderGeometry(0.42, 0.42, 0.3, 20), wheelMat);
+  w.rotation.z = Math.PI / 2;
+  w.position.set(x, 0.42, z);
+  w.scale.setScalar(0.001);
+  wheels.push(w);
+});
+
+// ---------- Transform poses ----------
+const POSE = [
+  [torso, [0, 2.3, 0], [0, 0, 0],        [0, 1.0, 0],      [0, 0, 0]],
+  [head,  [0, 1.15, 0], [0, 0, 0],       [0, 0.55, -0.4],  [-0.9, 0, 0]],
+  [armL,  [0, 0, 0],    [0, 0, 0.15],    [0, 0, 0],        [0, 0, 1.35]],
+  [armR,  [0, 0, 0],    [0, 0, -0.15],   [0, 0, 0],        [0, 0, -1.35]],
+  [legL,  [0, 0, 0],    [0, 0, 0],       [0, -0.25, 0.45], [1.35, 0, 0]],
+  [legR,  [0, 0, 0],    [0, 0, 0],       [0, -0.25, 0.45], [1.35, 0, 0]],
+];
+
+let transformT = 0, targetT = 0, isCar = false;
+
+function applyPose(t) {
+  const e = t * t * (3 - 2 * t);
+  for (const [obj, rp, rr, cp, cr] of POSE) {
+    obj.position.set(
+      rp[0] + (cp[0] - rp[0]) * e,
+      rp[1] + (cp[1] - rp[1]) * e,
+      rp[2] + (cp[2] - rp[2]) * e
+    );
+    obj.rotation.set(
+      rr[0] + (cr[0] - rr[0]) * e,
+      rr[1] + (cr[1] - rr[1]) * e,
+      rr[2] + (cr[2] - rr[2]) * e
+    );
+  }
+  torso.scale.set(1 + 0.25 * e, 1 - 0.35 * e, 1 + 0.8 * e);
+  wheels.forEach(w => w.scale.setScalar(Math.max(0.001, e)));
+}
+applyPose(0);
+
+// ---------- Marbles ----------
+const marbleGeo = new THREE.SphereGeometry(0.35, 20, 16);
+const marbleMats = [0xff4d6d, 0xffd93d, 0x6bff8f, 0x6cf, 0xc77dff].map(c =>
+  new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.45, metalness: .7, roughness: .2 })
+);
+const marbles = [];
+const MARBLE_COUNT = 24;
+
+function spawnMarble() {
+  let x, z;
+  do { x = (Math.random() * 2 - 1) * (ARENA - 2); z = (Math.random() * 2 - 1) * (ARENA - 2); }
+  while (Math.hypot(x - robot.position.x, z - robot.position.z) < 4);
+  const m = new THREE.Mesh(marbleGeo, marbleMats[Math.floor(Math.random() * marbleMats.length)]);
+  m.position.set(x, 0.6, z);
+  m.castShadow = true;
+  scene.add(m);
+  marbles.push({ mesh: m, phase: Math.random() * Math.PI * 2 });
+}
+for (let i = 0; i < MARBLE_COUNT; i++) spawnMarble();
+
+// ---------- Input & movement (fast!) ----------
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key.toLowerCase() === 'q' && playing && !shopOpen) {
+    isCar = !isCar;
+    targetT = isCar ? 1 : 0;
+    const label = document.getElementById('modeLabel');
+    label.textContent = isCar ? 'CAR 🏎' : 'ROBOT';
+    label.className = isCar ? 'car-mode' : 'robot-mode';
+  }
+});
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+const vel = new THREE.Vector3();
+let facing = 0;
+
+function updateMovement(dt) {
+  const speed = isCar ? 24 : 13;
+  const accel = isCar ? 70 : 50;
+  let dx = 0, dz = 0;
+  if (keys['w'] || keys['arrowup']) dz -= 1;
+  if (keys['s'] || keys['arrowdown']) dz += 1;
+  if (keys['a'] || keys['arrowleft']) dx -= 1;
+  if (keys['d'] || keys['arrowright']) dx += 1;
+  const len = Math.hypot(dx, dz) || 1;
+  vel.x += (dx / len) * accel * dt;
+  vel.z += (dz / len) * accel * dt;
+  vel.multiplyScalar(Math.max(0, 1 - 6 * dt));
+  const v = Math.hypot(vel.x, vel.z);
+  if (v > speed) { vel.x *= speed / v; vel.z *= speed / v; }
+
+  robot.position.x = THREE.MathUtils.clamp(robot.position.x + vel.x * dt, -ARENA, ARENA);
+  robot.position.z = THREE.MathUtils.clamp(robot.position.z + vel.z * dt, -ARENA, ARENA);
+
+  if (v > 0.5) {
+    const target = Math.atan2(vel.x, vel.z);
+    let d = target - facing;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    facing += d * Math.min(1, 12 * dt);
+  }
+  robot.rotation.y = facing;
+
+  if (!isCar) {
+    robot.position.y = v > 0.5 ? Math.abs(Math.sin(performance.now() / 70)) * 0.12 : 0;
+  } else {
+    robot.position.y = 0.05;
+    wheels.forEach(w => w.rotation.x += v * dt * 2);
+  }
+}
+
+// ---------- Solana login (Phantom) + IPFPS ----------
+const statusEl = document.getElementById('statusMsg');
+const walletBtn = document.getElementById('walletBtn');
+const walletChip = document.getElementById('walletChip');
+const balanceEl = document.getElementById('marbleBalance');
+
+let playerToken = null, playerUserId = null, walletAddress = null, isGuest = false;
+let marbleBalance = null, currentRoundId = null, shopOpen = false;
+let unlockedSkins = new Set(['standard']);
+
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function base58encode(bytes) {
+  const digits = [0];
+  for (const b of bytes) {
+    let carry = b;
+    for (let i = 0; i < digits.length; i++) {
+      carry += digits[i] << 8;
+      digits[i] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let str = '';
+  for (const b of bytes) { if (b === 0) str += '1'; else break; }
+  return str + digits.reverse().map(d => B58[d]).join('');
+}
+
+const shortAddr = a => a ? a.slice(0, 4) + '…' + a.slice(-4) : '';
+
+function setStatus(msg, isErr) {
+  statusEl.textContent = msg;
+  statusEl.className = isErr ? 'err' : '';
+}
+
+async function api(path, payload) {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return { ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) };
+}
+
+async function refreshBalance() {
+  if (!playerToken) return;
+  try {
+    const { ok, data } = await api('/api/balance', { token: playerToken });
+    if (!ok) return;
+    playerUserId = data.user_id || playerUserId;
+    marbleBalance = (data.balances && data.balances.MARBLE) || 0;
+    balanceEl.textContent = `${marbleBalance} $MARBLE`;
+  } catch { /* keep old balance */ }
+}
+
+async function fetchInventory() {
+  if (!playerToken) return [];
+  try {
+    const { ok, data } = await api('/api/inventory', { token: playerToken });
+    if (!ok) return [];
+    return (data.items || []).filter(i => i.status === 'active');
+  } catch { return []; }
+}
+
+walletBtn.addEventListener('click', async () => {
+  const provider = window.solana;
+  if (!provider || !provider.isPhantom) {
+    setStatus('Phantom wallet not found — install it from phantom.com', true);
+    toast('Phantom wallet not found — install it from phantom.com', 'error');
+    return;
+  }
+  walletBtn.disabled = true;
+  setStatus('Waiting for wallet approval…');
+  try {
+    const { publicKey } = await provider.connect();
+    walletAddress = publicKey.toBase58();
+
+    const { data: nonceData } = await api('/api/auth/nonce', { address: walletAddress });
+    if (!nonceData.nonce) throw new Error('no nonce');
+
+    const message = `Welcome to MarbleBot.\nTo authenticate, please sign this message to verify your wallet ownership.\nNonce: ${nonceData.nonce}`;
+    const { signature } = await provider.signMessage(new TextEncoder().encode(message), 'utf8');
+
+    const { ok, data: verifyData } = await api('/api/auth/verify', {
+      address: walletAddress, chain: 'solana:mainnet',
+      walletName: 'Phantom', message,
+      signature: base58encode(signature),
+      device_id: 'web', language: 'en'
+    });
+    if (!ok || !verifyData.token) throw new Error(verifyData.error || 'verify failed');
+
+    playerToken = verifyData.token;
+    isGuest = false;
+    walletChip.innerHTML = `👛 <b>${shortAddr(walletAddress)}</b> · Phantom`;
+    await refreshBalance();
+    await refreshUnlocks(true);
+    applySkin(localStorage.getItem(skinKey()) || 'standard');
+    toast(`👛 Wallet ${shortAddr(walletAddress)} connected`, 'success');
+    await refreshGlobalBoard();
+    startGame();
+  } catch (err) {
+    setStatus('Login failed: ' + (err.message || err) + ' — try again', true);
+    toast('Login failed: ' + (err.message || err), 'error');
+    walletBtn.disabled = false;
+  }
+});
+
+document.getElementById('guestBtn').addEventListener('click', () => {
+  isGuest = true;
+  walletChip.textContent = '👤 guest (local only)';
+  balanceEl.textContent = 'guest';
+  applySkin(localStorage.getItem(skinKey()) || 'standard');
+  renderLocalBoard();
+  toast('Playing as guest — connect a wallet to earn $MARBLE', 'info');
+  startGame();
+});
+
+// ---------- Shop ----------
+const shopOverlay = document.getElementById('shopOverlay');
+const shopItemsEl = document.getElementById('shopItems');
+let shopCatalog = [];
+
+document.getElementById('shopBtn').addEventListener('click', openShop);
+document.getElementById('closeShopBtn').addEventListener('click', closeShop);
+
+function openShop() {
+  shopOpen = true;
+  shopOverlay.style.display = 'flex';
+  loadShop();
+}
+
+function closeShop() {
+  shopOpen = false;
+  shopOverlay.style.display = 'none';
+}
+
+async function refreshUnlocks(notify = false) {
+  const inv = await fetchInventory();
+  const found = new Set(['standard']);
+  for (const item of inv) {
+    const skin = item.code && item.code.startsWith('transformer_') ? item.code.slice(12) : null;
+    if (skin && SKINS[skin]) {
+      if (!unlockedSkins.has(skin) && notify) {
+        toast(`🔓 ${SKINS[skin].label} unlocked for you!`, 'success', 6000);
+      }
+      found.add(skin);
+    }
+  }
+  // toast for anything that was unlocked before but no longer active (e.g. revoked)
+  for (const skin of unlockedSkins) {
+    if (!found.has(skin) && notify) {
+      toast(`🔒 ${SKINS[skin].label} is now locked`, 'error', 6000);
+    }
+  }
+  unlockedSkins = found;
+  if (!unlockedSkins.has(currentSkin)) applySkin('standard');
+  return inv;
+}
+
+async function loadShop() {
+  shopItemsEl.innerHTML = 'Loading…';
+  await refreshUnlocks(true);
+
+  // catalog from the tenant S2S API
+  try {
+    const r = await fetch('/api/shop');
+    const d = await r.json();
+    shopCatalog = (d.products || []).filter(p => p.is_active !== false && p.code && p.code.startsWith('transformer_'));
+  } catch {
+    shopCatalog = [];
+  }
+
+  renderShop();
+}
+
+function renderShop() {
+  let html = '';
+
+  // built-in standard skin row
+  html += shopRow({
+    icon: SKINS.standard.icon, name: SKINS.standard.label,
+    desc: 'Default blue armor. Always available.',
+    badge: currentSkin === 'standard' ? '<span class="badge equipped">EQUIPPED</span>'
+      : '<span class="badge owned">OWNED</span>',
+    button: currentSkin === 'standard'
+      ? '<button disabled>Equipped</button>'
+      : '<button class="equip" data-equip="standard">Equip</button>'
+  });
+
+  for (const p of shopCatalog) {
+    const skin = p.code.slice(12);
+    if (!SKINS[skin]) continue;
+    const owned = unlockedSkins.has(skin);
+    const equipped = currentSkin === skin;
+    const badge = equipped ? '<span class="badge equipped">EQUIPPED</span>'
+      : owned ? '<span class="badge owned">🔓 UNLOCKED</span>'
+      : '<span class="badge locked">🔒 LOCKED</span>';
+    let button;
+    if (equipped) button = '<button disabled>Equipped</button>';
+    else if (owned) button = `<button class="equip" data-equip="${skin}">Equip</button>`;
+    else if (isGuest) button = `<button disabled title="Connect a wallet">Wallet required</button>`;
+    else button = `<button data-buy="${p.id}" data-code="${p.code}">Buy — ${p.price} $MARBLE</button>`;
+    html += shopRow({
+      icon: SKINS[skin].icon, name: SKINS[skin].label,
+      desc: escapeHtml(p.description || 'A new transformer form.'),
+      badge, button, equipped
+    });
+  }
+
+  if (!shopCatalog.length) {
+    html += `<p style="color:#9ab;font-size:13px">No premium transformers in the catalog yet — check back soon!</p>`;
+  }
+  shopItemsEl.innerHTML = html;
+
+  shopItemsEl.querySelectorAll('[data-equip]').forEach(btn =>
+    btn.addEventListener('click', () => {
+      const skin = btn.dataset.equip;
+      if (!unlockedSkins.has(skin)) {
+        toast(`🔒 ${SKINS[skin].label} is locked — buy it first`, 'error');
+        return;
+      }
+      applySkin(skin);
+      toast(`${SKINS[skin].icon} ${SKINS[skin].label} equipped`, 'success');
+      renderShop();
+    })
+  );
+
+  shopItemsEl.querySelectorAll('[data-buy]').forEach(btn =>
+    btn.addEventListener('click', () => buyItem(parseInt(btn.dataset.buy, 10), btn.dataset.code, btn))
+  );
+}
+
+function shopRow({ icon, name, desc, badge, button, equipped }) {
+  return `<div class="shop-item${equipped ? ' equipped-item' : ''}">
+    <div class="icon">${icon}</div>
+    <div class="info"><div class="name">${escapeHtml(name)} ${badge}</div><div class="desc">${desc}</div></div>
+    ${button}
+  </div>`;
+}
+
+async function buyItem(productId, code, btn) {
+  if (!playerToken) {
+    toast('🔒 Connect a Solana wallet to buy items', 'error');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Buying…';
+  toast('🛒 Purchase initiated — waiting for confirmation…', 'info');
+  try {
+    const { ok, data } = await api('/api/shop/buy', {
+      token: playerToken, product_id: productId, idempotency_key: crypto.randomUUID()
+    });
+    if (!ok) throw new Error(data.error || `HTTP ${data.status || 'error'}`);
+
+    // two-phase debit: poll inventory until active / rejected
+    for (let i = 0; i < 8; i++) {
+      await sleep(1500);
+      const inv = await fetchInventory();
+      if (inv.some(it => it.code === code)) {
+        toast(`🔓 Unlocked: ${SKINS[code.slice(12)]?.label || code}!`, 'success', 6000);
+        await refreshBalance();
+        await loadShop();
+        return;
+      }
+      // check for rejection
+      try {
+        const { data: all } = await api('/api/inventory', { token: playerToken });
+        const item = (all.items || []).find(it => it.code === code);
+        if (item && item.status === 'rejected') throw new Error('insufficient_funds');
+      } catch (e) {
+        if (e.message === 'insufficient_funds') {
+          toast('❌ Purchase rejected: not enough $MARBLE — play more rounds!', 'error', 6000);
+          await refreshBalance();
+          await loadShop();
+          return;
+        }
+        throw e;
+      }
+    }
+    toast('⏳ Purchase still pending — the shop will update shortly', 'info', 6000);
+  } catch (err) {
+    toast('❌ Purchase failed: ' + (err.message || err), 'error', 6000);
+  }
+  await loadShop();
+}
+
+// ---------- Leaderboards ----------
+async function refreshGlobalBoard() {
+  const div = document.getElementById('board');
+  try {
+    const r = await fetch('/api/leaderboard');
+    const d = await r.json();
+    const entries = d.entries || [];
+    if (!entries.length) { div.style.display = 'none'; return; }
+    div.style.display = 'block';
+    document.querySelector('#board h2').innerHTML = '🏆 Leaderboard <span class="ticker">$MARBLE</span>';
+    let html = '<tr><th>#</th><th>Player</th><th>$MARBLE</th></tr>';
+    entries.slice(0, 10).forEach(e => {
+      const name = e.username || (e.user_id || '').slice(0, 8) + '…';
+      const me = playerUserId && e.user_id === playerUserId ? ' class="me"' : '';
+      html += `<tr${me}><td>${e.rank}</td><td>${escapeHtml(name)}</td><td>${e.value}</td></tr>`;
+    });
+    document.getElementById('boardTable').innerHTML = html;
+  } catch { div.style.display = 'none'; }
+}
+
+// guest local fallback
+const LB_KEY = 'marblebot_leaderboard';
+const getLocalBoard = () => { try { return JSON.parse(localStorage.getItem(LB_KEY)) || []; } catch { return []; } };
+
+function renderLocalBoard() {
+  const board = getLocalBoard().slice(0, 10);
+  const div = document.getElementById('board');
+  if (!board.length) { div.style.display = 'none'; return; }
+  div.style.display = 'block';
+  document.querySelector('#board h2').innerHTML = '🏆 Local Leaderboard';
+  let html = '<tr><th>#</th><th>Name</th><th>Marbles</th></tr>';
+  board.forEach((e, i) => {
+    html += `<tr><td>${i + 1}</td><td>${escapeHtml(e.name)}</td><td>${e.score}</td></tr>`;
+  });
+  document.getElementById('boardTable').innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+refreshGlobalBoard();
+
+// ---------- Game state ----------
+let playing = false;
+let score = 0;
+let timeLeft = 60;
+const scoreEl = document.getElementById('score');
+const timeEl = document.getElementById('time');
+const mainOverlay = document.getElementById('mainOverlay');
+
+function startGame() {
+  score = 0;
+  timeLeft = 60;
+  scoreEl.textContent = 0;
+  timeEl.textContent = timeLeft;
+  robot.position.set(0, 0, 0);
+  vel.set(0, 0, 0);
+  isCar = false; targetT = 0; transformT = 0; applyPose(0);
+  const label = document.getElementById('modeLabel');
+  label.textContent = 'ROBOT'; label.className = 'robot-mode';
+  currentRoundId = (crypto.randomUUID && !isGuest) ? crypto.randomUUID() : null;
+  playing = true;
+  walletBtn.disabled = false;
+  mainOverlay.style.display = 'none';
+}
+
+async function endGame() {
+  playing = false;
+
+  if (isGuest) {
+    const board = getLocalBoard();
+    board.push({ name: 'guest-' + Math.random().toString(36).slice(2, 6), score, date: Date.now() });
+    board.sort((a, b) => b.score - a.score);
+    localStorage.setItem(LB_KEY, JSON.stringify(board.slice(0, 20)));
+    document.querySelector('#mainOverlay .panel h1').textContent = '⏰ Time\'s up!';
+    document.querySelector('#mainOverlay .panel .sub').textContent = `You collected ${score} marbles! (guest mode — connect a wallet to earn $MARBLE)`;
+    renderLocalBoard();
+    mainOverlay.style.display = 'flex';
+    return;
+  }
+
+  document.querySelector('#mainOverlay .panel h1').textContent = '⏰ Crediting your $MARBLE…';
+  document.querySelector('#mainOverlay .panel .sub').textContent = `You collected ${score} marbles!`;
+  mainOverlay.style.display = 'flex';
+
+  if (score > 0 && playerToken) {
+    try {
+      const { ok, data: d } = await api('/api/earn', {
+        token: playerToken, amount: score, round_id: currentRoundId
+      });
+      if (ok) {
+        marbleBalance = d.balance_after;
+        balanceEl.textContent = `${marbleBalance} $MARBLE`;
+        document.querySelector('#mainOverlay .panel h1').textContent = `💰 +${d.credited} $MARBLE earned!`;
+        document.querySelector('#mainOverlay .panel .sub').textContent =
+          `Total balance: ${d.balance_after} $MARBLE · wallet ${shortAddr(walletAddress)}`;
+        toast(`💰 +${d.credited} $MARBLE credited!`, 'success', 6000);
+      } else {
+        document.querySelector('#mainOverlay .panel h1').textContent = '⚠️ Credit failed';
+        document.querySelector('#mainOverlay .panel .sub').textContent = d.error || 'unknown error — your marbles may not have been saved';
+        toast('⚠️ Failed to credit $MARBLE: ' + (d.error || 'unknown error'), 'error', 8000);
+      }
+    } catch {
+      document.querySelector('#mainOverlay .panel h1').textContent = '⚠️ Network error';
+      document.querySelector('#mainOverlay .panel .sub').textContent = 'Could not reach the game server — marbles not saved';
+      toast('⚠️ Network error — marbles not saved', 'error', 8000);
+    }
+  } else {
+    document.querySelector('#mainOverlay .panel h1').textContent = '⏰ Time\'s up!';
+    document.querySelector('#mainOverlay .panel .sub').textContent = 'No marbles collected this round.';
+  }
+  await refreshBalance();
+  await refreshGlobalBoard();
+}
+
+// ---------- Main loop ----------
+const clock = new THREE.Clock();
+const camTarget = new THREE.Vector3();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  if (playing && !shopOpen) {
+    updateMovement(dt);
+
+    transformT += Math.sign(targetT - transformT) * dt / 0.7;
+    transformT = THREE.MathUtils.clamp(transformT, 0, 1);
+    applyPose(transformT);
+
+    for (let i = marbles.length - 1; i >= 0; i--) {
+      const mb = marbles[i];
+      mb.mesh.rotation.y += dt * 2;
+      mb.mesh.position.y = 0.6 + Math.sin(t * 3 + mb.phase) * 0.15;
+      if (mb.mesh.position.distanceTo(robot.position) < 1.6) {
+        scene.remove(mb.mesh);
+        marbles.splice(i, 1);
+        score++;
+        scoreEl.textContent = score;
+        spawnMarble();
+      }
+    }
+
+    timeLeft -= dt;
+    timeEl.textContent = Math.max(0, Math.ceil(timeLeft));
+    if (timeLeft <= 0) endGame();
+  } else if (!playing) {
+    robot.rotation.y += dt * 0.5;
+  }
+
+  const dist = isCar ? 10 : 8;
+  const h = isCar ? 4.5 : 5;
+  camTarget.set(
+    robot.position.x - Math.sin(robot.rotation.y) * dist,
+    h,
+    robot.position.z - Math.cos(robot.rotation.y) * dist
+  );
+  camera.position.lerp(camTarget, Math.min(1, 6 * dt));
+  camera.lookAt(robot.position.x, 1.5, robot.position.z);
+
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

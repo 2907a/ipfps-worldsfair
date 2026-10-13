@@ -1,0 +1,2943 @@
+openapi: 3.0.3
+info:
+  title: IPFPS Autonomous Web3 Cloud — Public API
+  version: 1.0.0
+  description: |
+    Public API of the IPFPS multi-tenant Web3 cloud, exposed through the single
+    battle gateway on your tenant origin `https://{slug}.demo.ipfps.org`
+    (the platform/self-service API lives on https://ipfps.org).
+
+    IPFPS is a multi-tenant PaaS for games and apps: your product is a *tenant*
+    — an isolated slice of the platform with its own users, balances (arbitrary
+    currency codes), ledger, leaderboards, shop, chat and configuration.
+
+    Authentication model (two credential types):
+    - **UserJWT** — humans (players) authenticate via local credentials, Solana
+      web3, Telegram init-data or an email magic link, and receive a 30-day JWT
+      (HS256, claims: user_id UUIDv7, auth_provider, app_slug == aud). The JWT
+      is sent in the `Init-Data` header on every request (never
+      `Authorization: Bearer`). There is no refresh token — re-run the auth flow.
+    - **TenantHMAC** — servers (your backend) authenticate to the Tenant S2S API
+      (`/api/tenant/*`) and partner payments (`POST /api/gateway/payments/create`)
+      with `X-Tenant-Key-Id` + `X-Tenant-Signature:
+      hex(HMAC-SHA256(secret, raw_request_body))`. GET requests sign the empty
+      string. Your tenant is pinned server-side from the key — never send slugs.
+
+    Tenant resolution is host-based: the gateway resolves your tenant from the
+    `Host` header (falling back to `Origin`/`Referer`). Browser calls need an
+    `Origin` header matching your tenant hosts; curl needs it manually
+    (`-H 'Origin: https://{slug}.demo.ipfps.org'`). Origin-exempt paths:
+    `/api/auth/*`, `/auth/magic`, `GET /api/deposit/config`, `/api/tenant/*`,
+    `/api/gateway/*`, payment provider callbacks.
+
+    Errors are JSON `{"error":"<stable_machine_code>"}`; rate limiting returns
+    `429` with body `{"code":"SLOW_DOWN","error":"...","retry_after":N}` and a
+    `Retry-After` header. Body limit: 1 MB.
+
+    **Extended rails (in maintenance / rolling out — capability statement, no
+    public endpoints yet):** EVM chains (Base, Arbitrum, Ethereum, BSC), TON,
+    Tempo and Stripe are on the roadmap. The per-tenant `token_policies`
+    pattern carries over to EVM (token `address` + `chainId` + `decimals`,
+    per-tenant escrow, published rate, min/max, internal currency) with
+    crediting via the same scanner pattern; `GET /api/deposit/config` will
+    grow per-token chain fields when a rail activates. Stripe will ride the
+    existing payments-intent pipeline (per-tenant merchant credentials via
+    ops, same webhook semantics). Do not build against these rails — contracts
+    are published before activation. See `AGENT_SPEC.md` §7.
+
+    The complete long-form contract (recipes, rate-limit buckets, config keys,
+    WebSocket protocol, webhooks, known doc drift) lives in
+    [`AGENT_SPEC.md`](./AGENT_SPEC.md) — this file is the machine-readable
+    companion.
+servers:
+  - url: https://{slug}.demo.ipfps.org
+    description: Battle gateway (single public entry; tenant resolved by Host;
+      the platform/self-service API lives on https://ipfps.org)
+    variables:
+      slug:
+        default: demo
+        description: your tenant subdomain
+tags:
+  - name: Auth
+    description: Player authentication (public / session-optional)
+  - name: User
+    description: Player-facing profile, ledger reads, referrals (JWT in Init-Data)
+  - name: Shop
+    description: Player-facing shop and inventory (JWT in Init-Data)
+  - name: Deposits
+    description: Crypto (Solana/SPL) and fiat top-ups
+  - name: Engagement
+    description: Tasks, faucet, daily streak, activities, push, chat, analytics
+  - name: Tenants
+    description: Self-service tenant management + S2S key lifecycle (platform JWT)
+  - name: Tenant S2S
+    description: Server-to-server API — your backend moves money and manages users (HMAC)
+  - name: Partner Payments
+    description: Selling your own goods for real money via the platform merchant
+  - name: Extended rails
+    description: |
+      IN MAINTENANCE / ROLLING OUT — EVM chains (Base, Arbitrum, Ethereum,
+      BSC), TON, Tempo, Stripe. Capability statement only (see info.description);
+      there are no public endpoints on these rails yet.
+paths:
+  # ---------------------------------------------------------------- Auth
+  /api/auth/nonce:
+    get:
+      tags: [Auth]
+      summary: Issue a Solana web3 login nonce
+      description: |
+        Returns a UUIDv7 nonce (5-minute expiry, single use, one active nonce
+        per address — re-request replaces). Route exists only when the tenant
+        has `solana_enabled` (and the deployment runs `SOLANA_ENABLED=true`);
+        otherwise it is a 404.
+      operationId: authNonce
+      parameters:
+        - name: address
+          in: query
+          required: true
+          schema: { type: string, maxLength: 100 }
+          description: Base58 Solana address (32-byte ed25519 pubkey)
+      responses:
+        '200':
+          description: Nonce issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NonceResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403':
+          description: web3 disabled for this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: web3_disabled }
+  /api/auth/web3/verify:
+    post:
+      tags: [Auth]
+      summary: Verify a signed web3 message and get a session JWT
+      description: |
+        Verifies an ed25519 signature over a message containing the issued
+        nonce verbatim (`strings.Contains(message, nonce)`). **Omnichannel:** if
+        the caller already presents a valid session JWT in `Init-Data`, the
+        wallet is linked to the existing account instead of logging in as the
+        wallet identity (response echoes the current token, `is_new_user:false`).
+      operationId: authWeb3Verify
+      security: [] # session JWT optional (omnichannel link)
+      parameters:
+        - $ref: '#/components/parameters/OptionalInitData'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Web3VerifyRequest' }
+      responses:
+        '200':
+          description: Authenticated (or wallet linked to the current session)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Invalid/expired nonce, missing nonce payload or bad signature
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                nonce_burned:
+                  value: { error: 'invalid or expired authentication request. please try again' }
+                no_nonce:
+                  value: { error: 'message does not contain the required nonce payload' }
+                bad_sig:
+                  value: { error: 'invalid cryptographic signature' }
+        '403':
+          description: web3 disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: web3_disabled }
+        '409':
+          description: Omnichannel link conflict (wallet already bound elsewhere)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a local username + password account
+      description: |
+        Username `^[a-zA-Z0-9_.\-@]{3,254}$`, register requires ≥5 chars;
+        usernames containing `@` are rejected (`400 email_requires_magic` —
+        email identities exist only via the magic flow). Password 8–72 chars.
+        Both consents must be `true` (`400 consent_required`), journaled
+        server-side.
+      operationId: authRegister
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterLoginRequest' }
+      responses:
+        '200':
+          description: Registered and authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403':
+          description: Registration closed for this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: registration_disabled }
+        '409':
+          description: Username taken
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: username_taken }
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Local login (username or email + password)
+      description: |
+        Same body as register; username OR email accepted (username ≥3 chars).
+        The same username in another tenant is a different account; login in a
+        tenant without the credential → `401 invalid_credentials`.
+      operationId: authLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterLoginRequest' }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_credentials }
+  /api/auth/magic/request:
+    post:
+      tags: [Auth]
+      summary: Request an email magic link
+      description: |
+        Always `200 {"ok":true}` on a syntactically valid email — no
+        account-existence oracle. Email regex
+        `^[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}$`, ≤254 chars.
+        Latest-wins (a newer request invalidates the old link); link is
+        one-time (jti = challenge id), 15-minute expiry.
+      operationId: authMagicRequest
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, maxLength: 254, format: email }
+      responses:
+        '200':
+          description: Request accepted (always, on valid email)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean, example: true } }
+        '400':
+          description: Malformed email
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_email }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/magic:
+    get:
+      tags: [Auth]
+      summary: Magic link landing (origin-exempt, 302 redirect)
+      description: |
+        The emailed link points at `{MINI_APP_URL}/auth/magic?token=…`.
+        Consumes the challenge and **302-redirects** to
+        `{MINI_APP_URL}/?magic_token=<session JWT>`. In an SPA you usually
+        forward the token to `POST /api/auth/magic/consume` instead.
+      operationId: authMagicLanding
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to the mini-app with the session JWT
+          headers:
+            Location:
+              schema: { type: string, example: 'https://{slug}.demo.ipfps.org/?magic_token=eyJ...' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/auth/magic/consume:
+    post:
+      tags: [Auth]
+      summary: Consume a magic token and get a session JWT
+      description: |
+        One-time use, 15-minute expiry, latest-wins. Magic users have no
+        password (`has_password:false`); `POST /api/user/set_password` can add
+        one later.
+      operationId: authMagicConsume
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, description: Magic challenge JWT from the email link }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '401':
+          description: Bad / reused / expired link
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_or_expired_link }
+        '409':
+          description: Identity owned by another global account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: identity_conflict }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/auth/tg:
+    post:
+      tags: [Auth]
+      summary: Telegram mini-app login (init-data HMAC)
+      description: |
+        Standard Telegram WebApp init-data, HMAC-verified against **your
+        tenant's** bot token (`apps.config.tg_bot_token`; empty →
+        `503 tg_auth_disabled`, fail-closed). Freshness gate: `auth_date`
+        within 24 h. New TG identities get username `tg_<telegram_id>`;
+        existing global accounts are SSO-linked into your tenant. Consent is
+        journaled as platform-attested.
+      operationId: authTG
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [init_data]
+              properties:
+                init_data: { type: string, description: Raw window.Telegram.WebApp.initData }
+      responses:
+        '200':
+          description: Authenticated (TG adds username/has_password)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '400':
+          description: Malformed init-data
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: bad_init_data }
+        '401':
+          description: HMAC verification failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_init_data }
+        '503':
+          description: TG auth not configured for this tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: tg_auth_disabled }
+  /api/auth/discord/login:
+    get:
+      tags: [Auth]
+      summary: Discord OAuth entry (deployment-gated)
+      description: |
+        **Exists only when the deployment wires Discord credentials** —
+        otherwise the route is absent (404). 307-redirects the browser to
+        `https://discord.com/api/oauth2/authorize?…&scope=identify`; optional
+        `?state` is passed through. After Discord redirects back to your
+        `redirect_uri` with `?code=…`, exchange it via
+        `POST /api/auth/discord/verify`.
+      operationId: authDiscordLogin
+      security: []
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, default: default_state }
+      responses:
+        '307':
+          description: Redirect to Discord OAuth
+  /api/auth/discord/verify:
+    post:
+      tags: [Auth]
+      summary: Discord OAuth code exchange
+      description: |
+        Same session envelope as the other auth methods. With a valid session
+        JWT in `Init-Data` the Discord identity is SSO-linked to the existing
+        account (omnichannel).
+      operationId: authDiscordVerify
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, description: authorization_code from the Discord redirect }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokenResponse' }
+        '400':
+          description: invalid request format or missing code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  # ---------------------------------------------------------------- Wallets (JWT)
+  /api/user/wallets:
+    get:
+      tags: [User]
+      summary: List the player's linked wallets
+      operationId: getUserWallets
+      responses:
+        '200':
+          description: Wallet list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/wallets/link:
+    post:
+      tags: [User]
+      summary: Link a wallet to the current account (trust-based)
+      description: |
+        Address must decode to a 32-byte ed25519 key (32–44 chars), `chain`
+        must start with `solana`. One owner per address globally.
+        NB: the *cryptographic* link path is web3 verify with a session (§3.1
+        of AGENT_SPEC).
+      operationId: linkUserWallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WalletLinkRequest' }
+      responses:
+        '200':
+          description: Linked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '400':
+          description: unsupported_chain / invalid_address
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Address already owned by another user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: wallet_taken }
+  /api/user/wallets/{id}:
+    delete:
+      tags: [User]
+      summary: Unlink a wallet
+      operationId: unlinkUserWallet
+      parameters:
+        - $ref: '#/components/parameters/WalletId'
+      responses:
+        '200':
+          description: Unlinked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: wallet_not_found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: wallet_not_found }
+  # ---------------------------------------------------------------- Profile
+  /api/user/me:
+    get:
+      tags: [User]
+      summary: Player profile document
+      description: |
+        `balances` is the source of truth (currency→amount map in your tenant);
+        `balance_wp`/`balance_usd` are legacy flat mirrors. `bonuses.faucet` /
+        `bonuses.streak` availability windows are epoch **milliseconds**.
+      operationId: getProfile
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfileResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Deleted user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'user not found' }
+  /api/user/nickname:
+    put:
+      tags: [User]
+      summary: Update nickname
+      description: |
+        3–15 runes, allowlist `^[\p{Latin}\p{Cyrillic}0-9_-]+( [\p{Latin}\p{Cyrillic}0-9_-]+)*$`
+        (letters/digits, single spaces between words, `_`, `-`); else `400` with
+        a descriptive message.
+      operationId: updateNickname
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nickname]
+              properties:
+                nickname: { type: string, minLength: 3, maxLength: 15 }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/settings:
+    put:
+      tags: [User]
+      summary: Update language and notification preferences
+      description: Language ∈ `en|ru|tt|zh` (others → `en`).
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                language: { type: string, enum: [en, ru, tt, zh] }
+                notification_prefs:
+                  type: object
+                  properties:
+                    daily_reminder: { type: boolean }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/ftue_complete:
+    post:
+      tags: [User]
+      summary: Mark onboarding (FTUE) done
+      operationId: completeFtue
+      responses:
+        '200':
+          description: Done
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/set_password:
+    post:
+      tags: [User]
+      summary: Set a password on a passwordless account (magic/TG/guest)
+      description: |
+        Works only when the account has a verified email credential in this
+        tenant and no password yet. The magic link dies once the password is set.
+      operationId: setPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, password2]
+              properties:
+                password: { type: string, minLength: 8, maxLength: 72 }
+                password2: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '200':
+          description: Password set
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '400':
+          description: |
+            password_already_set / weak_password / password_mismatch /
+            password_requires_verified_email
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/change_password:
+    post:
+      tags: [User]
+      summary: Change password (requires the current one)
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: { type: string }
+                new_password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '400':
+          description: weak_password / no_password_set
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: invalid_credentials (wrong old password)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_credentials }
+  # ---------------------------------------------------------------- Ledger reads (user)
+  /api/user/transactions:
+    get:
+      tags: [User]
+      summary: Player's ledger history (ISO-8601 created_at)
+      description: limit default 20, max 100; newest first.
+      operationId: getUserTransactions
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Transaction page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserTransactionsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  # ---------------------------------------------------------------- Activities
+  /api/user/activities:
+    get:
+      tags: [User]
+      summary: Player activity feed
+      description: Cursor paging by `before_id`; limit ≤100, default 50.
+      operationId: getActivities
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - name: before_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Activity page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivitiesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/activities/unread:
+    get:
+      tags: [User]
+      summary: Unread activity count
+      operationId: getUnreadActivities
+      responses:
+        '200':
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unread_count: { type: integer, example: 3 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/user/activities/read:
+    post:
+      tags: [User]
+      summary: Mark all activities read
+      operationId: markActivitiesRead
+      responses:
+        '200':
+          description: Marked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  # ---------------------------------------------------------------- Referrals (player)
+  /api/user/referrer:
+    post:
+      tags: [User]
+      summary: Link a referrer (self-serve invite, convention `?ref=<user_id>`)
+      description: |
+        One referrer per player per tenant, ever. Invite convention:
+        `?ref=<your user_id from /api/user/me>`.
+      operationId: linkReferrer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [referrer_id]
+              properties:
+                referrer_id: { type: string, format: uuid }
+                source:
+                  type: string
+                  pattern: '^[a-z0-9_]{1,32}$'
+                  description: Optional link source tag
+      responses:
+        '200':
+          description: Linked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '400':
+          description: |
+            invalid referrer_id / invalid referrer_id format / invalid source /
+            self-referral is not allowed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Already linked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'already linked' }
+  /api/user/referrals:
+    get:
+      tags: [User]
+      summary: Player referral dashboard
+      description: |
+        Fields `total_rewarded`, `current_percent`, `next_tier` and per-referral
+        deposit stats appear only when the rewards engine is enabled for your
+        tenant (`app_settings.referral_config`, default OFF).
+      operationId: getReferrals
+      responses:
+        '200':
+          description: Referral dashboard
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReferralsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  # ---------------------------------------------------------------- Leaderboard (player)
+  /api/leaderboard:
+    get:
+      tags: [User]
+      summary: Player-facing leaderboard (xp/user slice only; alias `GET /leaderboard`)
+      description: |
+        **No `score_type`/`entity_type` params** — always reads the `xp`/`user`
+        slice. `season` default `all_time` (platform months `YYYY_MM` or any
+        custom string). `my_rank_info` is present on page 1 only (else null).
+      operationId: getLeaderboard
+      parameters:
+        - $ref: '#/components/parameters/Season'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Leaderboard page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaderboardResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /leaderboard:
+    get:
+      tags: [User]
+      summary: Alias of `GET /api/leaderboard`
+      operationId: getLeaderboardAlias
+      parameters:
+        - $ref: '#/components/parameters/Season'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Leaderboard page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaderboardResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  # ---------------------------------------------------------------- Shop (player)
+  /api/shop/products:
+    get:
+      tags: [Shop]
+      summary: Active product showcase (no content payload)
+      description: limit ≤200, default 50.
+      operationId: getShopProducts
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Product page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShopProductsResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/shop/buy:
+    post:
+      tags: [Shop]
+      summary: Buy a product (two-phase async debit)
+      description: |
+        `idempotency_key` must parse as a UUID (v7 recommended, fresh per
+        attempt). The ledger debit is **asynchronous** — insufficient funds is
+        never a buy-time error; the item flips `pending_payment → active`
+        (debited) or `→ rejected`. Grant goods on `active` only; detect
+        rejection by polling `/api/shop/inventory`. Same key replay returns the
+        same item without double-debiting. Rate bucket `buy` (1 rps/15).
+      operationId: shopBuy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, idempotency_key]
+              properties:
+                product_id: { type: integer, format: int64 }
+                idempotency_key: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Purchase accepted (item pending_payment)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShopBuyResponse' }
+        '400':
+          description: bad_request (fields / non-UUID key)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: bad_request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Unknown/inactive SKU
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: not_found }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: Shop unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: shop_unavailable }
+  /api/shop/inventory:
+    get:
+      tags: [Shop]
+      summary: Player's inventory (no content payload)
+      description: |
+        `status` lifecycle: `pending_payment → active → rejected`.
+      operationId: getShopInventory
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Inventory page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InventoryResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/shop/inventory/{id}/content:
+    get:
+      tags: [Shop]
+      summary: Download purchased digital content
+      description: |
+        Raw content bytes, the SKU's `content_type` (default
+        `application/json`), `X-Content-Type-Options: nosniff`. Owner of an
+        **active** item only — anything else is masked `404 not_found` (never
+        403); non-digital item → `409 not_digital`.
+      operationId: getShopInventoryContent
+      parameters:
+        - $ref: '#/components/parameters/InventoryId'
+      responses:
+        '200':
+          description: Content bytes (Content-Type from the SKU)
+          content:
+            application/octet-stream: {}
+            application/json: {}
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: not_found (masked for non-owner / non-active)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: not_found }
+        '409':
+          description: Item is not a digital product
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: not_digital }
+  # ---------------------------------------------------------------- Deposits
+  /api/deposit/config:
+    get:
+      tags: [Deposits]
+      summary: Per-tenant crypto token policies (public, origin-exempt)
+      description: |
+        `tokens:[]` (and zeroed top-level fields) until ops registers a policy
+        for your tenant. Top-level fields are legacy mirrors of the first
+        policy entry — prefer per-token fields.
+      operationId: getDepositConfig
+      security: []
+      responses:
+        '200':
+          description: Token policies
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DepositConfig' }
+  /api/deposit/verify:
+    post:
+      tags: [Deposits]
+      summary: Manual deposit crediting ahead of the scanner tick
+      description: |
+        On success the balance is credited, a WS `deposit_confirmed` frame is
+        pushed and the platform webhook `deposit.confirmed` fires.
+      operationId: verifyDeposit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepositVerifyRequest' }
+      responses:
+        '200':
+          description: Credited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DepositVerifyResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: wallet_not_linked / sender_not_owned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Validation message (not the accepted token, wrong escrow, out of range)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502':
+          description: processing_failed (upstream error while crediting — safe to retry)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: processing_failed }
+        '503':
+          description: Escrow unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: escrow_unavailable }
+  /api/deposit/history:
+    get:
+      tags: [Deposits]
+      summary: Player's deposit history
+      description: limit default 20, max 200.
+      operationId: getDepositHistory
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Deposit page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DepositHistoryResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/wallet/deposit:
+    post:
+      tags: [Deposits]
+      summary: Fiat top-up intent (hosted page redirect)
+      description: |
+        Returns a provider `payment_url` — redirect the browser there. Security
+        invariant: any client-sent `intent_type`/`app_slug`/`event_id`/
+        `intent_payload` → `400 "deposits are balance-only"`. After payment the
+        USD balance is credited atomically and a `balance_update` WS frame is
+        pushed. **Status on the Global (ipfps) contour: fiat provider
+        credentials are not wired yet — confirm with ops at onboarding.**
+        Rate bucket `buy` (1 rps/15).
+      operationId: createWalletDeposit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number, exclusiveMinimum: 0, example: 500 }
+                description: { type: string, example: Top up }
+      responses:
+        '200':
+          description: Payment URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payment_url: { type: string, format: uri }
+        '400':
+          description: invalid amount / deposits are balance-only
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500':
+          description: Payment gateway is not configured on this server
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'payment gateway is not configured on this server' }
+        '503':
+          description: payments_disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: payments_disabled }
+  # ---------------------------------------------------------------- Engagement
+  /api/tasks:
+    get:
+      tags: [Engagement]
+      summary: 'Task list (header `X-Client-Env: browser` or `?client_env=`)'
+      operationId: getTasks
+      parameters:
+        - name: client_env
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Task list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TasksResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/tasks/{id}/verify:
+    post:
+      tags: [Engagement]
+      summary: Verify/claim a task
+      operationId: verifyTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Verified — returns the full task object with fresh progress
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  task: { $ref: '#/components/schemas/TaskItem' }
+                  multiplier: { type: number, example: 0.2 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/bonuses/faucet/claim:
+    post:
+      tags: [Engagement]
+      summary: Claim the faucet reward
+      description: |
+        During cooldown → `400` with the remaining wait in the message.
+        Reward currency/cooldown are tenant-configured (`faucet_currency` +
+        `faucet_config` in `app_settings`); absent for your tenant = OFF.
+      operationId: claimFaucet
+      responses:
+        '200':
+          description: Claimed; `nextAvailableAt` is epoch **milliseconds**
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  reward: { type: number, example: 100 }
+                  nextAvailableAt: { type: integer, format: int64, example: 1760000000000 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/bonuses/daily/claim:
+    post:
+      tags: [Engagement]
+      summary: Claim the daily streak reward
+      description: Availability windows live in `/api/user/me → bonuses.streak`.
+      operationId: claimDaily
+      responses:
+        '200':
+          description: Claimed; `nextAvailableAt`/`expiresAt` are epoch **milliseconds**
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: success }
+                  streak: { type: integer, example: 2 }
+                  reward:
+                    type: object
+                    properties:
+                      day_number: { type: integer, example: 2 }
+                      reward_type: { type: string, example: currency }
+                      reward_value: { type: number, example: 150 }
+                  nextAvailableAt: { type: integer, format: int64, example: 1760000000000 }
+                  expiresAt: { type: integer, format: int64, example: 1760200000000 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/push/subscribe:
+    post:
+      tags: [Engagement]
+      summary: Web Push subscription (best-effort for external tenants)
+      operationId: pushSubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PushSubscription' }
+      responses:
+        '200':
+          description: Subscribed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/push/unsubscribe:
+    post:
+      tags: [Engagement]
+      summary: Web Push unsubscription
+      operationId: pushUnsubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint: { type: string }
+      responses:
+        '200':
+          description: Unsubscribed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/chat/history:
+    get:
+      tags: [Engagement]
+      summary: Public lobby chat history (also delivered as WS `chat_history` on connect)
+      description: |
+        **Public** (no JWT). limit default 50, max 100. Message fields are
+        camelCase on the wire (`userId`, `isSystem`, …) — the same shape as
+        the WS `chat_message` frame.
+      operationId: getChatHistory
+      security: [] # public lobby read
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+      responses:
+        '200':
+          description: Chat messages (vault-backed lobby chat)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatHistoryResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/analytics/event:
+    post:
+      tags: [Engagement]
+      summary: 'HTTP analytics beacon (bucket `analytics`: 0.5 rps / 10 per IP)'
+      description: |
+        Body is `{"type": "…", "meta": {…}}` (**not** `event_type`/`metadata`).
+        `type` must match `^[a-z][a-z0-9_]{2,49}$` **and** be on the platform
+        event whitelist — today the whitelist carries only platform-app events
+        (`afro_*`), so external tenants cannot inject custom types
+        (operator-dependent). `meta` ≤1024 bytes serialized; `user_agent`,
+        `client_env` (header `X-Client-Env`) and `platform` (header
+        `X-Platform`) are auto-attached. Auth is optional — a valid JWT
+        attributes the event to the user, guests are accepted.
+      operationId: postAnalyticsEvent
+      security: [] # works for guests and users
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, example: afro_page_view }
+                meta: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+        '400':
+          description: 'invalid body / invalid type (format or not whitelisted) / meta too large'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  # ---------------------------------------------------------------- Tenants (self-service)
+  /api/tenants:
+    post:
+      tags: [Tenants]
+      summary: Create a tenant (platform origin, web3-verified account)
+      description: |
+        ≤3 tenants per web3-verified account. Slug
+        `^[a-z0-9]([a-z0-9-]{1,28}[a-z0-9])$`; reserved names + duplicates →
+        `409 slug_taken`. A first S2S key is minted automatically; the secret
+        is **shown once** — store it in a secrets manager. Bucket
+        `tenant_create` (0.1 rps / 2 per user).
+      operationId: createTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantCreateRequest' }
+      responses:
+        '201':
+          description: Tenant created with the first S2S key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantCreatedResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: slug_taken
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: slug_taken }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /api/tenants/mine:
+    get:
+      tags: [Tenants]
+      summary: List my tenants
+      operationId: listMyTenants
+      responses:
+        '200':
+          description: My tenants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantsMineResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/tenants/{slug}:
+    get:
+      tags: [Tenants]
+      summary: Read a tenant (owner-scoped; foreign slug → 404 not_found, never 403)
+      operationId: getTenant
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: not_found (existence is not revealed)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: not_found }
+    patch:
+      tags: [Tenants]
+      summary: jsonb-merge tenant config (takes effect live, no restarts)
+      description: |
+        Writable keys per AGENT_SPEC §15; ops-only `payments`/`tg_bot_token`
+        are silently stripped. Welcome validation: amount>0 requires currency
+        `^[A-Z0-9_]{2,32}$` (else `400 invalid_welcome`); amount=0 deletes the
+        key (welcome off). Audit: `config_patch`.
+      operationId: patchTenant
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantPatchRequest' }
+      responses:
+        '200':
+          description: Updated tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+        '400':
+          description: invalid_welcome
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_welcome }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: not_found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: not_found }
+  /api/tenants/{slug}/s2s-keys:
+    post:
+      tags: [Tenants]
+      summary: Mint an S2S key (max two active slots)
+      description: |
+        Third mint without revoking first → `409 key_slots_full`. Rotation =
+        mint second key → migrate traffic → revoke the old one; both keys
+        verify in parallel during the overlap. Audit: `s2s_key_mint`.
+      operationId: mintS2SKey
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '201':
+          description: Key minted (secret shown once)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SKeyWithSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: key_slots_full
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: key_slots_full }
+    get:
+      tags: [Tenants]
+      summary: List S2S keys (no secrets)
+      operationId: listS2SKeys
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Key list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: { $ref: '#/components/schemas/S2SKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/tenants/{slug}/s2s-keys/{key_id}/secret:
+    get:
+      tags: [Tenants]
+      summary: View an S2S secret in plaintext (owner only; every view journaled as s2s_secret_view)
+      operationId: getS2SSecret
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - $ref: '#/components/parameters/S2SKeyId'
+      responses:
+        '200':
+          description: Plaintext secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string, description: 64 hex chars }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/tenants/{slug}/s2s-keys/{key_id}:
+    delete:
+      tags: [Tenants]
+      summary: Revoke an S2S key (live removal from the edge key store)
+      operationId: revokeS2SKey
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - $ref: '#/components/parameters/S2SKeyId'
+      responses:
+        '204':
+          description: Revoked
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  # ---------------------------------------------------------------- Tenant S2S
+  /api/tenant/introspect:
+    post:
+      tags: [Tenant S2S]
+      summary: Validate a player JWT
+      description: |
+        Bad/expired token → `200 {"valid":false}` (never 401). Token of another
+        tenant → `403 slug_mismatch`. No slug is echoed.
+      operationId: s2sIntrospect
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: Introspection result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IntrospectResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+  /api/tenant/users:
+    post:
+      tags: [Tenant S2S]
+      summary: Admin-provision a user (idempotent by identifier)
+      description: |
+        Identifier: `username` XOR `email`. **No welcome bonus**; consent
+        journaled as `tenant_attested` (an email credential counts as verified
+        → `set_password` is allowed for the created account).
+      operationId: s2sCreateUser
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/S2SUserCreateRequest' }
+      responses:
+        '200':
+          description: User created or already existing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SUserCreateResponse' }
+        '400':
+          description: bad_request / invalid_request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+  /api/tenant/users/{user_id}:
+    get:
+      tags: [Tenant S2S]
+      summary: Read a user
+      description: |
+        Unknown UUID and another tenant's player are **indistinguishable** —
+        both `404 user_not_found` (applies to every `{user_id}` path).
+        Membership = any credential in your tenant.
+      operationId: s2sGetUser
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/S2SUserId'
+      responses:
+        '200':
+          description: User info
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SUserInfo' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/users/lookup:
+    get:
+      tags: [Tenant S2S]
+      summary: Look up a user by username or email
+      description: Exactly one of `username`/`email` (both/neither → `400 invalid_request`).
+      operationId: s2sLookupUser
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - name: username
+          in: query
+          schema: { type: string }
+        - name: email
+          in: query
+          schema: { type: string, maxLength: 254 }
+      responses:
+        '200':
+          description: Lookup hit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SLookupResponse' }
+        '400':
+          description: invalid_request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: invalid_request }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/balance/{user_id}:
+    get:
+      tags: [Tenant S2S]
+      summary: Read all balances of a user (empty map when none)
+      operationId: s2sGetBalance
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/S2SUserId'
+      responses:
+        '200':
+          description: Balances
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SBalanceResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/balance/hold:
+    post:
+      tags: [Tenant S2S]
+      summary: Hold funds (debit now, decide later)
+      description: |
+        Funds are **debited immediately** (a hold is a held debit — no
+        double-spend). Requires `idempotency_key` (else
+        `400 idempotency_key_required`). Same key + same payload → original
+        result; same key + different payload → `409 idempotency_conflict`.
+        Key scope is the **whole tenant** — namespace keys yourself
+        (`shop:…`, `round:…`). `round_id` links the hold to your game round.
+        No hold TTL in v1 — release abandoned holds from your backend.
+      operationId: s2sBalanceHold
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/S2SBalanceOperationBase'
+                - type: object
+                  required: [user_id, currency, amount, idempotency_key]
+                  properties:
+                    idempotency_key: { type: string, maxLength: 128 }
+                    round_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Hold created (funds debited)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hold_id: { type: string, format: uuid }
+                  balance_after: { type: number }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+        '409':
+          description: insufficient_funds / idempotency_conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/tenant/balance/settle:
+    post:
+      tags: [Tenant S2S]
+      summary: Capture a hold (platform keeps the funds)
+      description: |
+        Idempotent by `hold_id` (repeat = no-op). The balance is untouched by
+        settle itself.
+      operationId: s2sBalanceSettle
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HoldIdRequest' }
+      responses:
+        '200':
+          description: Captured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '409':
+          description: lock_not_found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: lock_not_found }
+  /api/tenant/balance/release:
+    post:
+      tags: [Tenant S2S]
+      summary: Cancel a hold and return funds (reversal record)
+      description: Idempotent by `hold_id` — repeat on a closed hold is a no-op.
+      operationId: s2sBalanceRelease
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HoldIdRequest' }
+      responses:
+        '200':
+          description: Released
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OkResponse' }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '409':
+          description: lock_not_found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: lock_not_found }
+  /api/tenant/balance/credit:
+    post:
+      tags: [Tenant S2S]
+      summary: Credit a user (requires idempotency_key)
+      description: |
+        `tx_type` whitelist `^(credit|reward|game_win|adjustment)$` (default
+        `credit`) → else `400 invalid_tx_type` (a credit cannot masquerade as
+        `deposit`). `comment` ≤512. Amounts ≤1e12 per call.
+      operationId: s2sBalanceCredit
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/S2SBalanceOperationBase'
+                - type: object
+                  required: [user_id, currency, amount, idempotency_key]
+                  properties:
+                    tx_type:
+                      type: string
+                      default: credit
+                      enum: [credit, reward, game_win, adjustment]
+                    comment: { type: string, maxLength: 512 }
+                    idempotency_key: { type: string, maxLength: 128 }
+      responses:
+        '200':
+          description: Credited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SBalanceMutationResponse' }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+        '409':
+          description: idempotency_conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: idempotency_conflict }
+  /api/tenant/balance/settle_full:
+    post:
+      tags: [Tenant S2S]
+      summary: Atomic two-leg settle (debit + credit in ONE tx)
+      description: |
+        If the debit leg exceeds the balance, **both** legs roll back — never a
+        half-settled state. At least one leg >0. Requires `idempotency_key`.
+        Ledger `tx_type`: `settle_debit`/`settle_credit`. Use for instant
+        per-round settle (payout = stake × multiplier).
+      operationId: s2sBalanceSettleFull
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, currency, debit_amount, credit_amount, idempotency_key]
+              properties:
+                user_id: { type: string, format: uuid }
+                currency: { $ref: '#/components/schemas/Currency' }
+                debit_amount: { type: number, minimum: 0, maximum: 1000000000000 }
+                credit_amount: { type: number, minimum: 0, maximum: 1000000000000 }
+                idempotency_key: { type: string, maxLength: 128 }
+                round_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Settled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SBalanceMutationResponse' }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+        '409':
+          description: insufficient_funds / idempotency_conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/tenant/transactions/{user_id}:
+    get:
+      tags: [Tenant S2S]
+      summary: User's ledger history (newest first)
+      description: limit ≤200, default 50.
+      operationId: s2sGetUserTransactions
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/S2SUserId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Transaction page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2STransactionsResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/payments:
+    get:
+      tags: [Tenant S2S]
+      summary: Your tenant's fiat payment rows
+      description: |
+        `currency` is the effective one (legacy NULL → `USD`). limit ≤200,
+        default 50.
+      operationId: s2sGetPayments
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Payment rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SPaymentsResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+  /api/tenant/score:
+    post:
+      tags: [Tenant S2S]
+      summary: Apply a signed score delta (polymorphic slices)
+      description: |
+        `points` is a signed delta (0 rejected). `score_type` (default `xp`)
+        and `entity_type` (default `user`) are `^[a-z0-9_]{1,50}$`. Any
+        `entity_type` ≠ `user` makes the write a polymorphic entity row:
+        `user_id` carries your entity id, no levels, no username resolution.
+        `season` — empty = current UTC calendar month `YYYY_MM`; any custom
+        string `^[A-Za-z0-9_-]{1,20}$`. `season_only:true` writes only the
+        season slice (all_time untouched, levels never recomputed); otherwise
+        every write also advances `all_time`. Levels move only when
+        `entity_type=="user"` + `score_type` == your tenant's `leveling_source`
+        (default `xp`/`all_time`) + not `season_only`.
+      operationId: s2sScore
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScoreRequest' }
+      responses:
+        '200':
+          description: Score applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScoreResponse' }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/score/{user_id}:
+    get:
+      tags: [Tenant S2S]
+      summary: Read a user's score/level
+      description: |
+        `season` empty → current calendar month (**defaults differ from the
+        S2S leaderboard**, which defaults to `all_time` — pass `season`
+        explicitly when it matters). `level` per your tenant's leveling source
+        (0 when no rows).
+      operationId: s2sGetScore
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/S2SUserId'
+        - name: season
+          in: query
+          schema: { type: string }
+        - name: score_type
+          in: query
+          schema: { type: string, pattern: '^[a-z0-9_]{1,50}$' }
+      responses:
+        '200':
+          description: Score
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SScoreResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/leaderboard:
+    get:
+      tags: [Tenant S2S]
+      summary: Read any score slice
+      description: |
+        `season` empty → `all_time`. limit ≤100, default 50.
+        `score_type`/`entity_type` echo the effective values — cache by the
+        echo. `username` falls back to nickname → `""`. No my-rank (use the
+        player-facing `/api/leaderboard` for that on the xp/user slice).
+      operationId: s2sGetLeaderboard
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - name: season
+          in: query
+          schema: { type: string }
+        - name: score_type
+          in: query
+          schema: { type: string, pattern: '^[a-z0-9_]{1,50}$' }
+        - name: entity_type
+          in: query
+          schema: { type: string, pattern: '^[a-z0-9_]{1,50}$' }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Leaderboard page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SLeaderboardResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+  /api/tenant/referrals/{user_id}:
+    get:
+      tags: [Tenant S2S]
+      summary: Server view of a user's referral graph
+      description: |
+        `rewards_enabled` = your tenant's `app_settings.referral_config`
+        opt-in (default false — without it the graph is pure statistics).
+      operationId: s2sGetReferrals
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/S2SUserId'
+      responses:
+        '200':
+          description: Referral graph
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SReferralsResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/referrals/link:
+    post:
+      tags: [Tenant S2S]
+      summary: Link referrer→referred (server-side invite)
+      description: |
+        Both users must be yours (provision with `POST /api/tenant/users`
+        first). Idempotency IS the edge (unique referred per tenant); the
+        `referral_linked` event fires once, on creation. `source`
+        `^[a-z0-9_]{1,32}$`.
+      operationId: s2sLinkReferral
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [referrer_id, referred_id]
+              properties:
+                referrer_id: { type: string, format: uuid }
+                referred_id: { type: string, format: uuid }
+                source: { type: string, pattern: '^[a-z0-9_]{1,32}$' }
+                idempotency_key: { type: string, maxLength: 128 }
+      responses:
+        '200':
+          description: Linked or already linked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [linked, already_linked] }
+        '400':
+          description: self_link / invalid source
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: self_link }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  /api/tenant/products:
+    put:
+      tags: [Tenant S2S]
+      summary: SKU upsert (stable idempotent key = code)
+      description: |
+        Re-PUT updates in place (`status:"upserted"`, first = `"created"`).
+        `is_active` is never touched by upsert — use activate/deactivate.
+        `content` is stored **opaque** (any JSON ≤512 KB, byte-for-byte
+        delivery). Validation errors (all 400): invalid_code / invalid_title /
+        invalid_price / invalid_currency / invalid_kind / content_required /
+        content_too_large.
+      operationId: s2sUpsertProduct
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductUpsertRequest' }
+      responses:
+        '200':
+          description: Upserted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductUpsertResponse' }
+        '400': { $ref: '#/components/responses/S2SBadRequest' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+    get:
+      tags: [Tenant S2S]
+      summary: Full catalog incl. inactive **with content**
+      description: |
+        The only payload-returning list. limit ≤200, default 50.
+      operationId: s2sGetProducts
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Catalog page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SProductsResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+  /api/tenant/products/{code}/activate:
+    post:
+      tags: [Tenant S2S]
+      summary: Activate a SKU
+      operationId: s2sActivateProduct
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ProductCode'
+      responses:
+        '200':
+          description: Activated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductActivationResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/tenant/products/{code}/deactivate:
+    post:
+      tags: [Tenant S2S]
+      summary: Deactivate a SKU
+      operationId: s2sDeactivateProduct
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ProductCode'
+      responses:
+        '200':
+          description: Deactivated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductActivationResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/tenant/purchases:
+    get:
+      tags: [Tenant S2S]
+      summary: Your sales export (newest first)
+      description: |
+        `user_id` filter optional (foreign UUID → `404 user_not_found` masked).
+      operationId: s2sGetPurchases
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Purchase page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S2SPurchasesResponse' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '404': { $ref: '#/components/responses/S2SUserNotFound' }
+  # ---------------------------------------------------------------- Partner payments
+  /api/gateway/payments/create:
+    post:
+      tags: [Partner Payments]
+      summary: Sell your own goods for real money (hosted page, webhook outcome)
+      description: |
+        Signed with your tenant S2S key pair (same headers as the Tenant S2S
+        API). The legacy `X-Gateway-Signature` + `GATEWAY_SECRET` +
+        mandatory-`app_slug` scheme is deprecated but still accepted — new
+        integrations must use the tenant key. `external_payment_id` is **your**
+        order id — the outcome webhook echoes it back (fulfill idempotently by
+        it). `amount` >0 USD; `receipt_items` must be a JSON array
+        (`400 "invalid receipt_items json"` otherwise). No platform balance is
+        deposited (`fulfill_mode=webhook`) — crediting goods is your webhook's
+        job. BYO merchant credentials (`apps.config.payments`) apply to
+        app-owned intents; balance top-up and partner payments always use the
+        **platform** merchant.
+      operationId: createPartnerPayment
+      security: [{ TenantHMAC: [], TenantKeyId: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PartnerPaymentRequest' }
+      responses:
+        '200':
+          description: Payment created (redirect the player to payment_url)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PartnerPaymentResponse' }
+        '400':
+          description: invalid request format or empty slug / invalid receipt_items json
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/S2SInvalidSignature' }
+        '403': { $ref: '#/components/responses/S2SForbidden' }
+        '500':
+          description: Payment gateway is not configured on this server
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'payment gateway is not configured on this server' }
+components:
+  securitySchemes:
+    UserJWT:
+      type: apiKey
+      in: header
+      name: Init-Data
+      description: |
+        Player session JWT (HS256, 30-day expiry, claims: user_id UUIDv7,
+        auth_provider, app_slug == aud). Sent in the `Init-Data` header —
+        `Authorization: Bearer` is ignored. On any 401 drop the token and
+        re-authenticate.
+    TenantHMAC:
+      type: apiKey
+      in: header
+      name: X-Tenant-Signature
+      description: |
+        `hex(HMAC-SHA256(secret, raw_request_body))` over the exact raw body
+        bytes (GET requests sign the empty string). Constant-time compare;
+        mismatch → 401 `invalid_signature`. Pair with `X-Tenant-Key-Id`.
+    TenantKeyId:
+      type: apiKey
+      in: header
+      name: X-Tenant-Key-Id
+      description: |
+        Identifies the S2S key (rotation). Unknown/revoked key → 403
+        `unknown_key` (revocation is live). Your tenant slug is pinned
+        server-side from the key — an explicit foreign `app_slug` in a body →
+        403 `slug_mismatch`.
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+    Season:
+      name: season
+      in: query
+      schema: { type: string }
+      description: Default `all_time` (platform months `YYYY_MM` or any custom string)
+    OptionalInitData:
+      name: Init-Data
+      in: header
+      required: false
+      schema: { type: string }
+      description: Existing session JWT — turns web3 verify into an omnichannel wallet link
+    WalletId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InventoryId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    TaskId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    TenantSlug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{1,28}[a-z0-9])$' }
+    S2SKeyId:
+      name: key_id
+      in: path
+      required: true
+      schema: { type: string }
+    S2SUserId:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: Membership = any credential in your tenant; unknown/foreign → 404 user_not_found
+    ProductCode:
+      name: code
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9_-]{1,50}$' }
+  responses:
+    BadRequest:
+      description: Malformed JSON / field validation (see the Error schema codes in info.description)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing/invalid session JWT or missing Origin on non-public paths
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            unauthorized: { value: { error: unauthorized } }
+            tenant_mismatch: { value: { error: tenant_mismatch } }
+    NotFound:
+      description: not_found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: not_found }
+    RateLimited:
+      description: |
+        Token-bucket quota exceeded. Body `{"code":"SLOW_DOWN","error":"...","retry_after":N}`
+        + `Retry-After` header (seconds; the IAM tenant_create bucket returns
+        plain `{"error":"SLOW_DOWN"}` with only the header).
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  code: { type: string, example: SLOW_DOWN }
+                  retry_after: { type: integer, example: 3 }
+    S2SInvalidSignature:
+      description: invalid_signature — HMAC mismatch or missing signature/key-id headers
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: invalid_signature }
+    S2SForbidden:
+      description: unknown_key (revoked/unknown key_id) or slug_mismatch (foreign app_slug in body)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            unknown_key: { value: { error: unknown_key } }
+            slug_mismatch: { value: { error: slug_mismatch } }
+    S2SUserNotFound:
+      description: user_not_found (unknown or foreign user id — indistinguishable by design)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: user_not_found }
+    S2SBadRequest:
+      description: |
+        S2S validation codes (verbatim, all 400): bad_request (malformed body,
+        bad uuid) · invalid_request (zero amounts, both lookup params, bad
+        source, comment >512) · invalid_currency · invalid_amount (≤0 / >1e12)
+        · invalid_tx_type · invalid_score_type / invalid_entity_type · self_link
+        · idempotency_key_required
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string, description: Stable machine code }
+      required: [error]
+      example: { error: unauthorized }
+    StatusResponse:
+      type: object
+      properties:
+        status: { type: string, example: success }
+    OkResponse:
+      type: object
+      properties:
+        ok: { type: boolean, example: true }
+    Currency:
+      type: string
+      pattern: '^[A-Z0-9_]{2,32}$'
+      description: Arbitrary ledger currency code (balances keyed per tenant)
+    NonceResponse:
+      type: object
+      properties:
+        nonce: { type: string, format: uuid, description: UUIDv7, 5-min expiry, single use }
+      required: [nonce]
+    AuthTokenResponse:
+      type: object
+      properties:
+        token: { type: string, description: Session JWT (30 days, HS256) — send in Init-Data }
+        is_new_user: { type: boolean }
+        username: { type: string, description: TG auth adds this (tg_<id> for new identities) }
+        has_password: { type: boolean, description: TG auth adds this }
+      required: [token, is_new_user]
+    Web3VerifyRequest:
+      type: object
+      required: [address, chain, message, signature]
+      properties:
+        address: { type: string, maxLength: 100, description: Base58, 32-byte ed25519 pubkey }
+        chain: { type: string, description: Must start with `solana` (solana, solana:mainnet, solana-devnet, …) }
+        walletName: { type: string, description: Free-ish, analytics only }
+        message: { type: string, maxLength: 500, description: Must contain the issued nonce verbatim }
+        signature: { type: string, maxLength: 150, description: Base58, 64-byte ed25519 signature }
+        device_id: { type: string, description: Analytics only }
+        language: { type: string, description: Analytics only }
+    RegisterLoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          pattern: '^[a-zA-Z0-9_.\-@]{3,254}$'
+          description: |
+            Register requires ≥5 chars; `@` rejected at register
+            (400 email_requires_magic). Login accepts username or email.
+        password: { type: string, minLength: 8, maxLength: 72 }
+        consent_terms: { type: boolean }
+        consent_privacy: { type: boolean }
+        language: { type: string, example: en }
+    Wallet:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        address: { type: string }
+        chain: { type: string, example: solana }
+        wallet_name: { type: string }
+        created_at: { type: string, format: date-time }
+    WalletListResponse:
+      type: object
+      properties:
+        wallets:
+          type: array
+          items: { $ref: '#/components/schemas/Wallet' }
+    WalletLinkRequest:
+      type: object
+      required: [address, chain]
+      properties:
+        address: { type: string, minLength: 32, maxLength: 44 }
+        chain: { type: string, description: Must start with `solana` }
+        wallet_name: { type: string, example: Phantom }
+    UserProfileResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        telegram_id: { type: integer, nullable: true }
+        username: { type: string }
+        nickname: { type: string }
+        photo_url: { type: string }
+        balance_wp: { type: number, description: Legacy flat mirror of balances.WP }
+        balance_usd: { type: number, description: Legacy flat mirror of balances.USD }
+        balances:
+          type: object
+          additionalProperties: { type: number }
+          description: Source of truth — currency→amount map of every currency held in the tenant
+        language: { type: string, example: en }
+        notification_prefs:
+          type: object
+          properties:
+            daily_reminder: { type: boolean }
+        season_xp: { type: number }
+        current_season: { type: string, example: '2026_10', description: UTC calendar month YYYY_MM }
+        level_info: { $ref: '#/components/schemas/LevelInfo' }
+        bonuses: { $ref: '#/components/schemas/BonusesInfo' }
+        level_rewards: { type: array, items: { type: object } }
+        projects: { type: array, items: { type: object }, description: Platform-app roles (usually empty for external tenants) }
+        has_password: { type: boolean, description: false = magic/TG user who never set a password }
+        is_ftue_completed: { type: boolean }
+    LevelInfo:
+      type: object
+      properties:
+        current_level: { type: integer, example: 1 }
+        current_xp: { type: number, example: 0 }
+        level_start_xp: { type: number, example: 0 }
+        next_level_xp: { type: number, example: 1000 }
+        progress_percent: { type: number, example: 0 }
+    BonusesInfo:
+      type: object
+      properties:
+        multiplier: { type: number, example: 1.0 }
+        faucet:
+          type: object
+          properties:
+            nextAvailableAt: { type: integer, format: int64, description: Epoch MILLISECONDS }
+            baseReward: { type: number, example: 100 }
+        streak:
+          type: object
+          properties:
+            currentDay: { type: integer, example: 1 }
+            nextAvailableAt: { type: integer, format: int64, description: Epoch MILLISECONDS }
+            expiresAt: { type: integer, format: int64, description: Epoch MILLISECONDS }
+    UserTransaction:
+      type: object
+      properties:
+        id: { type: string }
+        user_id: { type: string, format: uuid }
+        amount: { type: number }
+        currency: { $ref: '#/components/schemas/Currency' }
+        type:
+          type: string
+          description: |
+            Common values: deposit, bet, refund, faucet, daily_reward,
+            welcome_bonus, referral_reward, level_up_reward, task_reward,
+            purchase, shop_buy, credit, reward, game_win, adjustment,
+            settle_debit, settle_credit
+        game_type: { type: string, nullable: true }
+        round_id: { type: string, format: uuid, nullable: true }
+        comment: { type: string, nullable: true }
+        metadata: { type: object, nullable: true, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    UserTransactionsResponse:
+      type: object
+      properties:
+        transactions:
+          type: array
+          items: { $ref: '#/components/schemas/UserTransaction' }
+        has_more: { type: boolean }
+    Activity:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string }
+        title: { type: string }
+        created_at: { type: string, format: date-time }
+    ActivitiesResponse:
+      type: object
+      properties:
+        activities:
+          type: array
+          items: { $ref: '#/components/schemas/Activity' }
+        has_more: { type: boolean }
+    LeaderboardEntry:
+      type: object
+      properties:
+        id: { type: string }
+        rank: { type: integer }
+        name: { type: string }
+        avatar: { type: string }
+        score: { type: number }
+        level: { type: integer }
+    LeaderboardResponse:
+      type: object
+      properties:
+        top_players:
+          type: array
+          items: { $ref: '#/components/schemas/LeaderboardEntry' }
+        my_rank_info:
+          allOf: [{ $ref: '#/components/schemas/LeaderboardEntry' }]
+          nullable: true
+          description: Page 1 only, else null
+        has_more: { type: boolean }
+    ReferralCurrencyStat:
+      type: object
+      properties:
+        currency: { type: string }
+        total_deposited: { type: number }
+        total_rewarded: { type: number }
+    ReferralsResponse:
+      type: object
+      description: |
+        The dashboard object is returned **directly** (not wrapped). Reward
+        engine is opt-in per tenant (`app_settings.referral_config`, default
+        OFF): with `rewards_enabled:false` the `total_rewarded` maps are empty,
+        `current_percent` is 0 and `next_tier` is absent; graph fields
+        (total_invited, referrals) are always present.
+      properties:
+        total_invited: { type: integer }
+        total_rewarded:
+          type: object
+          additionalProperties: { type: number }
+          description: currency → amount rewarded to this player
+        current_percent: { type: number }
+        next_tier:
+          type: object
+          nullable: true
+          properties:
+            min_refs: { type: integer }
+            percent: { type: number }
+        rewards_enabled: { type: boolean }
+        referrals:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              nickname: { type: string }
+              photo_url: { type: string }
+              total_deposited:
+                type: object
+                additionalProperties: { type: number }
+              total_rewarded:
+                type: object
+                additionalProperties: { type: number }
+              stats_by_currency:
+                type: array
+                items: { $ref: '#/components/schemas/ReferralCurrencyStat' }
+    ShopProduct:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string }
+        title: { type: string }
+        description: { type: string }
+        price: { type: number }
+        currency: { $ref: '#/components/schemas/Currency' }
+        image_url: { type: string }
+        kind: { type: string, enum: [digital, buff] }
+    ShopProductsResponse:
+      type: object
+      properties:
+        products:
+          type: array
+          items: { $ref: '#/components/schemas/ShopProduct' }
+        has_more: { type: boolean }
+    ShopBuyResponse:
+      type: object
+      properties:
+        item:
+          type: object
+          properties:
+            id: { type: integer, format: int64 }
+            product_id: { type: integer, format: int64 }
+            status: { type: string, enum: [pending_payment, active, rejected] }
+    InventoryItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        product_id: { type: integer, format: int64 }
+        code: { type: string }
+        title: { type: string }
+        kind: { type: string, example: digital }
+        content_type: { type: string, example: application/json }
+        status: { type: string, enum: [pending_payment, active, rejected] }
+        purchased_at: { type: string, format: date-time }
+    InventoryResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/InventoryItem' }
+        has_more: { type: boolean }
+    TokenPolicy:
+      type: object
+      properties:
+        symbol: { type: string, example: USDC }
+        mint: { type: string, description: SPL mint; empty = native SOL }
+        decimals: { type: integer }
+        chain: { type: string, example: solana }
+        escrow_wallet: { type: string }
+        rate: { type: number, description: 1 token = N internal units }
+        min_deposit: { type: number }
+        max_deposit: { type: number }
+        internal_currency: { $ref: '#/components/schemas/Currency' }
+    DepositConfig:
+      type: object
+      description: |
+        Top-level fields are legacy mirrors of the first policy entry — prefer
+        per-token fields. `tokens:[]` until ops registers a policy.
+      properties:
+        chain: { type: string, example: solana }
+        escrow_wallet: { type: string }
+        rate: { type: number }
+        min_deposit: { type: number }
+        max_deposit: { type: number }
+        tokens:
+          type: array
+          items: { $ref: '#/components/schemas/TokenPolicy' }
+    DepositVerifyRequest:
+      type: object
+      required: [signature, chain]
+      properties:
+        signature: { type: string, description: Base58 transaction signature }
+        chain: { type: string, example: solana }
+    DepositVerifyResponse:
+      type: object
+      properties:
+        status: { type: string, example: success }
+        amount_token: { type: number, example: 10 }
+        amount_wp: { type: number, example: 10000, description: Legacy key name — the value is in `currency`, not necessarily WP }
+        currency: { $ref: '#/components/schemas/Currency' }
+        token: { type: string, example: USDC }
+        tx_hash: { type: string }
+    DepositRecord:
+      type: object
+      properties:
+        id: { type: string }
+        chain: { type: string, example: solana }
+        tx_hash: { type: string }
+        token_symbol: { type: string }
+        amount_token: { type: number }
+        credited_currency: { $ref: '#/components/schemas/Currency' }
+        amount_wp: { type: number, description: Legacy key name }
+        exchange_rate: { type: number }
+        created_at: { type: string, format: date-time }
+    DepositHistoryResponse:
+      type: object
+      properties:
+        deposits:
+          type: array
+          items: { $ref: '#/components/schemas/DepositRecord' }
+        limit: { type: integer }
+        offset: { type: integer }
+    TaskReward:
+      type: object
+      properties:
+        type: { type: string, example: currency, description: 'wp (balance, optional currency) | item (item id) | vpn_days' }
+        value: { type: integer, example: 50 }
+        currency: { type: string, description: Balance currency for type=wp; empty = WP }
+    TaskItem:
+      type: object
+      description: Task template + per-player progress (fields from the task dictionary)
+      properties:
+        id: { type: string, format: uuid }
+        task_type: { type: string, example: telegram_join }
+        category: { type: string, example: social }
+        config: { type: object, additionalProperties: true, description: 'Task-specific settings, e.g. {"chat_id":"-100…"}' }
+        reward_mult: { type: number, example: 0.2 }
+        reward_onetime:
+          type: array
+          items: { $ref: '#/components/schemas/TaskReward' }
+        platforms: { type: array, items: { type: string }, example: ['tma', 'browser'] }
+        required_account: { type: string, example: telegram }
+        title_key: { type: string, description: i18n key for the title }
+        desc_key: { type: string, description: i18n key for the description }
+        icon: { type: string, description: Emoji or URL }
+        is_active: { type: boolean }
+        sort_order: { type: integer }
+        availability: { type: string }
+        onetime_claimed: { type: boolean }
+    TasksResponse:
+      type: object
+      properties:
+        status: { type: string }
+        tasks:
+          type: array
+          items: { $ref: '#/components/schemas/TaskItem' }
+        multiplier: { type: number }
+    PushSubscription:
+      type: object
+      required: [endpoint, p256dh, auth]
+      properties:
+        endpoint: { type: string }
+        p256dh: { type: string }
+        auth: { type: string }
+        device_id: { type: string }
+    ChatMessage:
+      type: object
+      description: camelCase wire format (parity with the WS chat_message frame)
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: string, format: uuid }
+        nickname: { type: string }
+        avatar: { type: string }
+        level: { type: integer }
+        text: { type: string }
+        timestamp: { type: integer, format: int64, description: epoch milliseconds }
+        isSystem: { type: boolean }
+        sysType: { type: string }
+        sysArgs: { type: object, additionalProperties: true }
+    ChatHistoryResponse:
+      type: object
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/ChatMessage' }
+    # ---- Tenants
+    TenantConfig:
+      type: object
+      description: |
+        `apps.config` per-tenant registry record (jsonb merge on PATCH;
+        hot-reload, no restarts). Writable keys: registration_enabled,
+        solana_enabled (alias web3_enabled), welcome {currency, amount},
+        currencies[], features, cors_origins[], webhook_url,
+        live_feed_enabled, magic_enabled, require_email_verification.
+        Operator-only (stripped from self-service PATCH): tg_bot_token, payments.
+      properties:
+        registration_enabled: { type: boolean }
+        solana_enabled: { type: boolean }
+        web3_enabled: { type: boolean }
+        welcome:
+          type: object
+          properties:
+            currency: { $ref: '#/components/schemas/Currency' }
+            amount: { type: number }
+        currencies:
+          type: array
+          items: { type: string }
+        features: { type: object, additionalProperties: true }
+        cors_origins:
+          type: array
+          items: { type: string }
+          description: Exact scheme://host[:port]; no wildcards
+        webhook_url: { type: string, format: uri, description: Target of platform event webhooks; empty = off }
+        live_feed_enabled: { type: boolean }
+        magic_enabled: { type: boolean }
+        require_email_verification: { type: boolean }
+    Tenant:
+      type: object
+      properties:
+        slug: { type: string, example: my-game }
+        name: { type: string }
+        type: { type: string, enum: [external, platform], example: external }
+        config: { $ref: '#/components/schemas/TenantConfig' }
+        hosts: { type: array, items: { type: string }, description: 'Self-serve tenants have hosts:[] even though {slug}.demo.ipfps.org resolves' }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    TenantCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{1,28}[a-z0-9])$' }
+        name: { type: string }
+    S2SKey:
+      type: object
+      properties:
+        key_id: { type: string }
+        active: { type: boolean }
+    S2SKeyWithSecret:
+      type: object
+      properties:
+        key_id: { type: string }
+        secret: { type: string, description: 64 hex — SHOWN ONCE, store in a secrets manager }
+    TenantCreatedResponse:
+      allOf:
+        - $ref: '#/components/schemas/Tenant'
+        - type: object
+          properties:
+            s2s_key: { $ref: '#/components/schemas/S2SKeyWithSecret' }
+    TenantsMineResponse:
+      type: object
+      properties:
+        tenants:
+          type: array
+          items: { $ref: '#/components/schemas/Tenant' }
+    TenantPatchRequest:
+      type: object
+      properties:
+        config: { $ref: '#/components/schemas/TenantConfig' }
+    # ---- S2S
+    IntrospectResponse:
+      type: object
+      properties:
+        valid: { type: boolean }
+        user_id: { type: string, format: uuid, nullable: true }
+        auth_provider: { type: string, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+    S2SUserCreateRequest:
+      type: object
+      description: Identifier — username XOR email
+      properties:
+        username: { type: string }
+        email: { type: string, maxLength: 254, description: Creates a verified email credential }
+        password: { type: string, minLength: 8, maxLength: 72 }
+        language: { type: string }
+        app_slug: { type: string, description: Ignored/pinned — an explicit foreign slug → 403 slug_mismatch }
+    S2SUserCreateResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        status: { type: string, enum: [created, existing] }
+        has_password: { type: boolean }
+    S2SUserInfo:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        username: { type: string, description: '"" for web3/TG-only identities' }
+        created_at: { type: string, format: date-time }
+        has_password: { type: boolean }
+    S2SLookupResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        username: { type: string }
+    S2SBalanceResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        balances:
+          type: object
+          additionalProperties: { type: number }
+          description: All currencies; empty map when no balances
+    S2SBalanceOperationBase:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        currency: { $ref: '#/components/schemas/Currency' }
+        amount: { type: number, exclusiveMinimum: 0, maximum: 1000000000000 }
+    S2SBalanceMutationResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        currency: { $ref: '#/components/schemas/Currency' }
+        balance_after: { type: number }
+    HoldIdRequest:
+      type: object
+      required: [hold_id]
+      properties:
+        hold_id: { type: string, format: uuid }
+    S2STransaction:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string }
+        currency: { $ref: '#/components/schemas/Currency' }
+        amount: { type: number }
+        comment: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    S2STransactionsResponse:
+      type: object
+      properties:
+        transactions:
+          type: array
+          items: { $ref: '#/components/schemas/S2STransaction' }
+        has_more: { type: boolean }
+    S2SPayment:
+      type: object
+      properties:
+        id: { type: string }
+        amount: { type: number }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status: { type: string, example: success }
+        external_payment_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    S2SPaymentsResponse:
+      type: object
+      properties:
+        payments:
+          type: array
+          items: { $ref: '#/components/schemas/S2SPayment' }
+    ScoreRequest:
+      type: object
+      required: [user_id, points]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: For entity_type ≠ user this carries your entity id (squad/guild)
+        points: { type: number, description: Signed delta; 0 rejected }
+        reason: { type: string }
+        idempotency_key: { type: string, maxLength: 128 }
+        season: { type: string, description: 'Empty = current UTC month YYYY_MM; custom ^[A-Za-z0-9_-]{1,20}$' }
+        score_type: { type: string, pattern: '^[a-z0-9_]{1,50}$', default: xp }
+        entity_type: { type: string, pattern: '^[a-z0-9_]{1,50}$', default: user }
+        season_only: { type: boolean, description: Write only the season slice (all_time untouched, levels never recomputed) }
+    ScoreResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        applied: { type: number }
+        global_xp: { type: number }
+        season_xp: { type: number }
+        old_level: { type: integer }
+        new_level: { type: integer }
+        season: { type: string }
+    S2SScoreResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        global_xp: { type: number }
+        season_xp: { type: number }
+        level: { type: integer, description: Per your tenant's leveling source (0 when no rows) }
+        season: { type: string }
+        score_type: { type: string }
+    S2SLeaderboardEntry:
+      type: object
+      properties:
+        rank: { type: integer }
+        user_id: { type: string, description: Entity id for non-user slices }
+        username: { type: string, description: Falls back to nickname → "" }
+        value: { type: number }
+    S2SLeaderboardResponse:
+      type: object
+      properties:
+        season: { type: string }
+        score_type: { type: string }
+        entity_type: { type: string }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/S2SLeaderboardEntry' }
+        has_more: { type: boolean }
+    S2SReferral:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        username: { type: string }
+        source: { type: string }
+        created_at: { type: string, format: date-time }
+    S2SReferralsResponse:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        referrer_id: { type: string, format: uuid, nullable: true }
+        total_invited: { type: integer }
+        rewards_enabled: { type: boolean, description: app_settings.referral_config opt-in (default false) }
+        referrals:
+          type: array
+          items: { $ref: '#/components/schemas/S2SReferral' }
+    ProductUpsertRequest:
+      type: object
+      required: [code, title, price]
+      properties:
+        code: { type: string, pattern: '^[a-z0-9_-]{1,50}$', description: Stable idempotent key; is_active never touched by upsert }
+        title: { type: string, maxLength: 255 }
+        description: { type: string, maxLength: 4096 }
+        price: { type: number, exclusiveMinimum: 0, maximum: 1000000000000 }
+        currency: { $ref: '#/components/schemas/Currency' }
+        image_url: { type: string, maxLength: 1024 }
+        sort_order: { type: integer }
+        kind: { type: string, enum: [digital, buff], default: digital, description: digital requires non-empty content; buff ignores it }
+        content_type: { type: string, maxLength: 100, default: application/json }
+        content: { type: object, additionalProperties: true, description: Any JSON ≤512 KB; stored opaque, byte-for-byte delivery }
+    ProductUpsertResponse:
+      type: object
+      properties:
+        product_id: { type: integer, format: int64 }
+        status: { type: string, enum: [created, upserted] }
+    TenantProduct:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string }
+        title: { type: string }
+        description: { type: string }
+        price: { type: number }
+        currency: { $ref: '#/components/schemas/Currency' }
+        image_url: { type: string }
+        sort_order: { type: integer }
+        kind: { type: string, example: digital }
+        content_type: { type: string }
+        is_active: { type: boolean }
+        content: { type: object, additionalProperties: true, description: Content snapshot at activation time for sold items }
+    S2SProductsResponse:
+      type: object
+      properties:
+        products:
+          type: array
+          items: { $ref: '#/components/schemas/TenantProduct' }
+        has_more: { type: boolean }
+    ProductActivationResponse:
+      type: object
+      properties:
+        code: { type: string }
+        is_active: { type: boolean }
+    S2SPurchase:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        user_id: { type: string, format: uuid }
+        product_id: { type: integer, format: int64 }
+        product_code: { type: string }
+        product_title: { type: string }
+        status: { type: string, example: active }
+        purchased_at: { type: string, format: date-time }
+    S2SPurchasesResponse:
+      type: object
+      properties:
+        purchases:
+          type: array
+          items: { $ref: '#/components/schemas/S2SPurchase' }
+        has_more: { type: boolean }
+    PartnerPaymentRequest:
+      type: object
+      required: [external_payment_id, amount, webhook_url]
+      properties:
+        external_payment_id: { type: string, description: Your order id — echoed back in the outcome webhook }
+        amount: { type: number, exclusiveMinimum: 0, description: USD }
+        webhook_url: { type: string, format: uri }
+        redirect_success_url: { type: string, format: uri }
+        redirect_fail_url: { type: string, format: uri }
+        is_test: { type: boolean }
+        receipt_items: { type: array, items: { type: object }, description: Must be a JSON array }
+    PartnerPaymentResponse:
+      type: object
+      properties:
+        payment_url: { type: string, format: uri }
+    # ---- Webhooks (platform → your backend)
+    WebhookEnvelope:
+      type: object
+      description: |
+        Platform event webhook envelope (POST to `apps.config.webhook_url`,
+        at-least-once, 200-only success, 15 s timeout, NakWithDelay retries
+        30 s → 2 min → 10 min → 1 h, dead-lettered after 5 attempts). Signed
+        with the tenant S2S secret: `X-Tenant-Signature:
+        hex(HMAC-SHA256(secret, raw_body))`. Dedup key: `data.event_id`.
+      required: [event, occurred_at, data]
+      properties:
+        event: { type: string, enum: [user.registered, deposit.confirmed, referral.linked] }
+        occurred_at: { type: string, format: date-time, description: RFC3339 UTC — dispatch time }
+        data: { $ref: '#/components/schemas/WebhookEventData' }
+    WebhookEventData:
+      type: object
+      description: |
+        Discriminated by `event`:
+        - user.registered — {user_id, auth_provider, username (may be ""), event_id}
+        - deposit.confirmed — {user_id, currency, amount, tx_id, chain:"",
+          token_symbol:"", event_id} (v1 limitation: chain/token_symbol always
+          empty strings)
+        - referral.linked — {referrer_id, referred_id, source, event_id}
+      properties:
+        event_id: { type: string, format: uuid, description: UUIDv7 — dedup key }
+        user_id: { type: string, format: uuid }
+        auth_provider: { type: string }
+        username: { type: string }
+        currency: { $ref: '#/components/schemas/Currency' }
+        amount: { type: number }
+        tx_id: { type: string }
+        chain: { type: string, description: Always "" in v1 }
+        token_symbol: { type: string, description: Always "" in v1 }
+        referrer_id: { type: string, format: uuid }
+        referred_id: { type: string, format: uuid }
+        source: { type: string }
+    PartnerPaymentWebhook:
+      type: object
+      description: |
+        Outcome of `POST /api/gateway/payments/create`, POSTed to the
+        per-payment `webhook_url`, signed with the gateway secret
+        `X-Gateway-Signature: hex(HMAC-SHA256(GATEWAY_SECRET, raw_body))`.
+        Only successful payments are pushed; `external_payment_id` is the only
+        correlation field — fulfill idempotently by it.
+      properties:
+        external_payment_id: { type: string }
+        status: { type: string, example: success }
+        amount: { type: number }
+  security:
+    - UserJWT: []

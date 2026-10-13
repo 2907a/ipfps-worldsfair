@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="description" content="IPFPS World's Fair — instant Web3 backend for AI vibe-coders. Solana-native auth, S2S API, dedicated backend per app.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:">
+<title>IPFPS World's Fair</title>
+<link rel="icon" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"%3E%3Crect width="32" height="32" rx="8" fill="%2305060f"/%3E%3Crect x="7" y="7" width="18" height="18" rx="5" fill="none" stroke="%2322d3ee" stroke-width="2.5"/%3E%3Ccircle cx="16" cy="16" r="3.5" fill="%2314f195"/%3E%3C/svg%3E'>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   IPFPS WORLD'S FAIR — design tokens (owner template, unchanged)
+   ============================================================ */
+:root{
+  --cyan:#22d3ee;
+  --cyan-dim:rgba(34,211,238,.16);
+  --solana-green:#14f195;
+  --solana-purple:#9945ff;
+  --bg:#05060f;
+  --bg-soft:#0a0d1d;
+  --panel:rgba(13,16,32,.72);
+  --panel-hard:#0d1020;
+  --border:rgba(34,211,238,.18);
+  --border-strong:rgba(34,211,238,.4);
+  --text:#e6f1ff;
+  --muted:#8b9bb4;
+  --danger:#ff5470;
+  --warn:#ffc857;
+  --ok:#14f195;
+  --font-display:'Cabinet Grotesk','Plus Jakarta Sans',system-ui,sans-serif;
+  --font-body:'Plus Jakarta Sans',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,monospace;
+  --radius:14px;
+  --header-h:64px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--font-body);
+  font-size:16px;
+  line-height:1.55;
+  min-height:100vh;
+  overflow-x:hidden;
+}
+::selection{background:var(--solana-purple);color:#fff}
+
+/* ---------- 3D backdrop ---------- */
+#webgl-canvas{
+  position:fixed;inset:0;width:100%;height:100%;
+  z-index:0;display:block;
+  transition:opacity .6s ease;
+}
+body.view-console #webgl-canvas{opacity:.35}
+.bg-fallback{
+  position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(60% 50% at 50% 30%,rgba(153,69,255,.14),transparent 70%),
+    radial-gradient(40% 35% at 70% 70%,rgba(20,241,149,.08),transparent 70%),
+    var(--bg);
+}
+
+/* ---------- CRT overlay ---------- */
+.crt-overlay{
+  position:fixed;inset:0;z-index:50;pointer-events:none;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.14) 0 1px,transparent 1px 3px);
+  mix-blend-mode:multiply;
+  opacity:.5;
+}
+.crt-overlay::after{
+  content:"";position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 50% 40%,transparent 60%,rgba(0,0,0,.5));
+  animation:crtFlicker 7s infinite;
+}
+@keyframes crtFlicker{
+  0%,100%{opacity:1}
+  92%{opacity:1}
+  93%{opacity:.86}
+  94%{opacity:1}
+  97%{opacity:.93}
+  98%{opacity:1}
+}
+
+/* ---------- Header ---------- */
+.site-header{
+  position:fixed;top:0;left:0;right:0;height:var(--header-h);z-index:40;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 clamp(16px,4vw,40px);
+  background:linear-gradient(180deg,rgba(5,6,15,.9),rgba(5,6,15,.55));
+  backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border);
+}
+.brand{display:flex;align-items:center;gap:12px;user-select:none}
+.brand-mark{
+  width:34px;height:34px;border-radius:9px;flex:none;
+  background:conic-gradient(from 210deg,var(--solana-purple),var(--cyan),var(--solana-green),var(--solana-purple));
+  box-shadow:0 0 18px rgba(153,69,255,.55);
+  position:relative;
+}
+.brand-mark::after{
+  content:"";position:absolute;inset:6px;border-radius:5px;background:var(--bg);
+}
+.brand-name{
+  font-family:var(--font-display);font-weight:700;font-size:15px;
+  letter-spacing:.14em;text-transform:uppercase;
+}
+.brand-name em{
+  font-style:normal;color:var(--cyan);
+}
+.brand-sub{
+  font-family:var(--font-mono);font-size:10px;color:var(--muted);
+  letter-spacing:.22em;text-transform:uppercase;display:block;margin-top:1px;
+}
+.view-switch{
+  display:flex;gap:2px;background:rgba(13,16,32,.6);
+  border:1px solid var(--border);border-radius:10px;padding:3px;
+}
+.view-switch button{
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);background:none;border:none;
+  border-radius:7px;padding:7px 14px;cursor:pointer;white-space:nowrap;
+  transition:background .15s ease,color .15s ease;
+}
+.view-switch button:hover{color:var(--text)}
+.view-switch button.active{background:rgba(34,211,238,.12);color:var(--cyan)}
+@media(max-width:620px){.view-switch button{padding:6px 9px;font-size:10px}}
+.wallet-btn{
+  font-family:var(--font-mono);font-size:13px;font-weight:500;
+  color:var(--bg);background:linear-gradient(90deg,var(--solana-green),var(--cyan));
+  border:none;border-radius:10px;padding:10px 18px;cursor:pointer;
+  transition:transform .15s ease,box-shadow .15s ease;
+  box-shadow:0 0 0 rgba(20,241,149,0);
+}
+.wallet-btn:hover{transform:translateY(-1px);box-shadow:0 6px 24px rgba(34,211,238,.35)}
+.wallet-btn.ghost{
+  background:transparent;color:var(--cyan);
+  border:1px solid var(--border-strong);
+}
+.wallet-btn:disabled{opacity:.55;cursor:wait;transform:none}
+.wallet-btn.connected{background:var(--panel-hard);color:var(--solana-green);border:1px solid rgba(20,241,149,.4)}
+
+/* ---------- Layout ---------- */
+main{position:relative;z-index:10}
+.view{display:none}
+.view.active{display:block}
+
+/* ---------- Hero ---------- */
+.hero{
+  min-height:100vh;display:flex;flex-direction:column;justify-content:center;
+  padding:calc(var(--header-h) + 40px) clamp(16px,6vw,80px) 80px;
+  max-width:1200px;margin:0 auto;
+}
+.eyebrow{
+  font-family:var(--font-mono);font-size:12px;letter-spacing:.3em;
+  text-transform:uppercase;color:var(--cyan);margin-bottom:22px;
+  display:flex;align-items:center;gap:12px;
+}
+.eyebrow::before{content:"";width:36px;height:1px;background:var(--cyan)}
+.hero h1{
+  font-family:var(--font-display);
+  font-size:clamp(48px,9vw,116px);
+  line-height:.95;font-weight:800;letter-spacing:-.02em;
+  text-transform:uppercase;
+}
+.hero h1 .grad{
+  background:linear-gradient(90deg,var(--solana-green) 0%,var(--cyan) 45%,var(--solana-purple) 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  display:inline-block;
+}
+.hero-sub{
+  max-width:560px;color:var(--muted);font-size:17px;margin:26px 0 36px;
+}
+.hero-cta{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.cta-primary{
+  font-family:var(--font-mono);font-size:14px;font-weight:700;
+  padding:16px 28px;border:none;border-radius:12px;cursor:pointer;
+  color:var(--bg);letter-spacing:.04em;
+  background:linear-gradient(90deg,var(--solana-green),var(--cyan));
+  box-shadow:0 8px 40px rgba(34,211,238,.28);
+  transition:transform .15s ease,box-shadow .15s ease;
+}
+.cta-primary:hover{transform:translateY(-2px);box-shadow:0 12px 54px rgba(34,211,238,.42)}
+.cta-primary:disabled{opacity:.55;cursor:wait;transform:none}
+.cta-secondary{
+  font-family:var(--font-mono);font-size:13px;color:var(--muted);
+  background:none;border:none;cursor:pointer;letter-spacing:.06em;
+  border-bottom:1px dashed var(--border-strong);padding-bottom:2px;
+}
+.cta-secondary:hover{color:var(--cyan)}
+.hero-meta{
+  margin-top:56px;display:flex;flex-wrap:wrap;gap:28px;
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);
+}
+.hero-meta b{color:var(--solana-green);font-weight:500}
+
+/* ---------- Sections ---------- */
+.section{max-width:1200px;margin:0 auto;padding:70px clamp(16px,6vw,80px)}
+.section-head{margin-bottom:36px}
+.section-head h2{
+  font-family:var(--font-display);font-size:clamp(26px,4vw,40px);
+  font-weight:700;letter-spacing:-.01em;text-transform:uppercase;
+}
+.section-head p{color:var(--muted);max-width:640px;margin-top:10px}
+
+/* ---------- Cards / grids ---------- */
+.grid{display:grid;gap:16px}
+.grid.cols-3{grid-template-columns:repeat(3,1fr)}
+.grid.cols-2{grid-template-columns:repeat(2,1fr)}
+@media(max-width:900px){.grid.cols-3{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:620px){.grid.cols-3,.grid.cols-2{grid-template-columns:1fr}}
+
+.card{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:22px;
+  backdrop-filter:blur(8px);
+  transition:border-color .2s ease,transform .2s ease;
+}
+.card:hover{border-color:var(--border-strong);transform:translateY(-2px)}
+.card h3{
+  font-family:var(--font-display);font-size:17px;font-weight:700;
+  margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.card p{color:var(--muted);font-size:13.5px}
+.tag{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;padding:3px 8px;border-radius:20px;
+  border:1px solid rgba(20,241,149,.45);color:var(--solana-green);
+}
+.tag.roadmap{border-color:rgba(255,200,87,.5);color:var(--warn)}
+.tag.demo{border-color:rgba(153,69,255,.55);color:#c4a1ff}
+.card .mono{font-family:var(--font-mono);font-size:12px}
+
+/* how it works */
+.hiw-step{
+  position:relative;
+}
+.hiw-num{
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.2em;
+  color:var(--solana-purple);margin-bottom:12px;display:block;
+}
+
+/* closing */
+.closing{
+  text-align:center;padding:90px clamp(16px,6vw,80px) 100px;
+  max-width:900px;margin:0 auto;
+}
+.closing p{
+  font-family:var(--font-display);font-size:clamp(22px,3.4vw,34px);
+  font-weight:700;line-height:1.3;letter-spacing:-.01em;
+}
+.closing a{
+  display:inline-block;margin-top:26px;font-family:var(--font-mono);
+  font-size:13px;letter-spacing:.08em;color:var(--cyan);
+  text-decoration:none;border-bottom:1px dashed var(--border-strong);
+  padding-bottom:2px;
+}
+.closing a:hover{color:var(--solana-green)}
+
+/* ---------- Console ---------- */
+.console-wrap{
+  max-width:1280px;margin:0 auto;
+  padding:calc(var(--header-h) + 28px) clamp(12px,3vw,36px) 60px;
+  display:grid;grid-template-columns:280px 1fr;gap:20px;align-items:start;
+  min-height:100vh;
+}
+@media(max-width:900px){.console-wrap{grid-template-columns:1fr}}
+
+.console-side{
+  background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);padding:18px;backdrop-filter:blur(10px);
+}
+.side-label{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.2em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:10px;
+}
+.quota-banner{
+  font-family:var(--font-mono);font-size:12px;color:var(--muted);
+  border:1px dashed var(--border-strong);border-radius:10px;
+  padding:10px 12px;margin-bottom:14px;line-height:1.5;
+}
+.quota-banner b{color:var(--cyan);font-weight:700}
+.quota-note{display:block;font-size:10.5px;color:var(--muted);opacity:.8}
+.tenant-item{
+  width:100%;text-align:left;background:transparent;cursor:pointer;
+  border:1px solid transparent;border-radius:10px;padding:10px 12px;
+  color:var(--text);font-family:var(--font-body);margin-bottom:6px;
+  display:flex;flex-direction:column;gap:2px;
+  transition:border-color .15s ease,background .15s ease;
+}
+.tenant-item:hover{background:rgba(34,211,238,.06)}
+.tenant-item.active{border-color:var(--border-strong);background:rgba(34,211,238,.08)}
+.tenant-item .t-name{font-weight:700;font-size:14px}
+.tenant-item .t-slug{font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.side-actions{margin-top:10px}
+.side-btn{
+  width:100%;font-family:var(--font-mono);font-size:13px;padding:12px;
+  border-radius:10px;cursor:pointer;
+  background:transparent;color:var(--cyan);border:1px solid var(--border-strong);
+  transition:background .15s ease;
+}
+.side-btn:hover{background:rgba(34,211,238,.08)}
+.side-btn:disabled{opacity:.4;cursor:not-allowed}
+.empty-state{
+  border:1px dashed var(--border-strong);border-radius:10px;
+  padding:18px;text-align:center;color:var(--muted);font-size:13px;
+}
+
+.console-main{
+  background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);backdrop-filter:blur(10px);min-height:70vh;
+  overflow:hidden;
+}
+.tabs{
+  display:flex;gap:2px;border-bottom:1px solid var(--border);
+  padding:0 12px;overflow-x:auto;flex-wrap:nowrap;
+}
+.tab{
+  font-family:var(--font-mono);font-size:12px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);background:none;border:none;
+  padding:16px 14px;cursor:pointer;white-space:nowrap;
+  border-bottom:2px solid transparent;margin-bottom:-1px;
+}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--cyan);border-bottom-color:var(--cyan)}
+.panel{display:none;padding:26px}
+.panel.active{display:block}
+@media(max-width:620px){.panel{padding:18px 14px}}
+
+.panel h2{
+  font-family:var(--font-display);font-size:22px;text-transform:uppercase;
+  letter-spacing:.02em;margin-bottom:18px;
+}
+
+/* stat cards */
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px}
+@media(max-width:900px){.stat-grid{grid-template-columns:repeat(2,1fr)}}
+.stat{
+  background:var(--bg-soft);border:1px solid var(--border);
+  border-radius:10px;padding:14px;
+}
+.stat .s-label{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:6px;
+}
+.stat .s-value{font-family:var(--font-mono);font-size:15px;font-weight:700;word-break:break-all}
+.stat .s-value.good{color:var(--ok)}
+.stat .s-value.dim{color:var(--muted);font-weight:400}
+
+.kv-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:10px 0;border-bottom:1px solid rgba(34,211,238,.08);
+}
+.kv-row:last-child{border-bottom:none}
+.kv-key{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);width:130px;flex:none;
+}
+.kv-val{font-family:var(--font-mono);font-size:13px;word-break:break-all}
+.copy-btn{
+  font-family:var(--font-mono);font-size:10px;padding:4px 10px;
+  background:transparent;border:1px solid var(--border-strong);
+  color:var(--cyan);border-radius:6px;cursor:pointer;flex:none;
+}
+.copy-btn:hover{background:rgba(34,211,238,.1)}
+.mini-btn{
+  font-family:var(--font-mono);font-size:11px;padding:8px 14px;
+  background:transparent;border:1px solid var(--border-strong);
+  color:var(--text);border-radius:8px;cursor:pointer;
+}
+.mini-btn:hover{border-color:var(--cyan);color:var(--cyan)}
+.mini-btn.primary{background:rgba(20,241,149,.12);border-color:rgba(20,241,149,.45);color:var(--solana-green)}
+.mini-btn:disabled{opacity:.45;cursor:wait}
+.mini-btn.danger{border-color:rgba(255,84,112,.5);color:var(--danger)}
+.block{
+  background:var(--bg-soft);border:1px solid var(--border);
+  border-radius:10px;padding:18px;margin-bottom:16px;
+}
+.block h3{
+  font-family:var(--font-display);font-size:15px;text-transform:uppercase;
+  letter-spacing:.06em;margin-bottom:14px;color:var(--text);
+}
+.block .hint{font-size:12px;color:var(--muted);margin-top:8px}
+
+/* toggles */
+.toggle-row{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:10px 0;border-bottom:1px solid rgba(34,211,238,.08);
+}
+.toggle-row:last-of-type{border-bottom:none}
+.toggle-row .t-title{font-size:14px;font-weight:600}
+.toggle-row .t-desc{font-size:12px;color:var(--muted)}
+.switch{position:relative;width:44px;height:24px;flex:none}
+.switch input{opacity:0;width:100%;height:100%;position:absolute;cursor:pointer;margin:0;z-index:2}
+.switch .track{
+  position:absolute;inset:0;border-radius:20px;background:#1a2036;
+  border:1px solid var(--border);transition:background .2s ease;
+}
+.switch .track::after{
+  content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;
+  border-radius:50%;background:var(--muted);transition:transform .2s ease,background .2s ease;
+}
+.switch input:checked + .track{background:rgba(20,241,149,.25);border-color:rgba(20,241,149,.5)}
+.switch input:checked + .track::after{transform:translateX(20px);background:var(--solana-green)}
+
+/* forms */
+.field{margin-bottom:14px}
+.field label{
+  display:block;font-family:var(--font-mono);font-size:10.5px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+  margin-bottom:6px;
+}
+.field input,.field textarea{
+  width:100%;background:#070a17;border:1px solid var(--border);
+  border-radius:8px;color:var(--text);font-family:var(--font-mono);
+  font-size:13px;padding:10px 12px;outline:none;
+  transition:border-color .15s ease;
+}
+.field input:focus,.field textarea:focus{border-color:var(--cyan)}
+.field textarea{min-height:88px;resize:vertical;line-height:1.6}
+.field .err{color:var(--danger);font-size:11.5px;margin-top:5px;display:none}
+.field.invalid input{border-color:var(--danger)}
+.field.invalid .err{display:block}
+.form-row{display:flex;gap:12px;flex-wrap:wrap}
+.form-row .field{flex:1;min-width:140px}
+.save-row{display:flex;justify-content:flex-end;margin-top:4px}
+
+/* activity table */
+.act-table{width:100%;border-collapse:collapse;font-size:13px}
+.act-table th{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);text-align:left;
+  padding:8px 10px;border-bottom:1px solid var(--border);
+}
+.act-table td{
+  padding:10px;border-bottom:1px solid rgba(34,211,238,.07);
+  font-family:var(--font-mono);font-size:12px;
+}
+.act-table tr:last-child td{border-bottom:none}
+.act-amt.pos{color:var(--solana-green)}
+.act-amt.neg{color:var(--danger)}
+@media(max-width:620px){.act-table .hide-sm{display:none}}
+
+/* agent pack */
+pre.prompt-box{
+  background:#070a17;border:1px solid var(--border);border-radius:10px;
+  padding:16px;font-family:var(--font-mono);font-size:12px;line-height:1.7;
+  color:#bfe9ff;overflow-x:auto;white-space:pre; margin-bottom:14px;
+}
+.dl-link{
+  display:inline-flex;align-items:center;gap:8px;text-decoration:none;
+  font-family:var(--font-mono);font-size:13px;padding:12px 20px;
+  border-radius:10px;background:rgba(153,69,255,.14);
+  border:1px solid rgba(153,69,255,.5);color:#c4a1ff;margin-right:10px;
+}
+.dl-link:hover{background:rgba(153,69,255,.25)}
+
+/* ---------- Modals ---------- */
+.modal-backdrop{
+  position:fixed;inset:0;z-index:80;background:rgba(3,4,10,.78);
+  backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;
+  padding:18px;
+}
+.modal-backdrop.open{display:flex}
+.modal{
+  width:100%;max-width:460px;background:var(--panel-hard);
+  border:1px solid var(--border-strong);border-radius:16px;
+  padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.6);
+  animation:modalIn .18s ease;
+}
+@keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+.modal h3{
+  font-family:var(--font-display);font-size:19px;text-transform:uppercase;
+  letter-spacing:.03em;margin-bottom:6px;
+}
+.modal .m-sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;flex-wrap:wrap}
+.wallet-option{
+  width:100%;display:flex;align-items:center;gap:12px;text-align:left;
+  background:var(--bg-soft);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;margin-bottom:8px;cursor:pointer;color:var(--text);
+  transition:border-color .15s ease;
+}
+.wallet-option:hover{border-color:var(--cyan)}
+.wallet-option img{width:28px;height:28px;border-radius:7px}
+.wallet-option .w-name{font-weight:700;font-size:14px}
+.wallet-option .w-kind{font-family:var(--font-mono);font-size:10.5px;color:var(--muted)}
+.secret-box{
+  background:#070a17;border:1px solid rgba(255,200,87,.4);border-radius:10px;
+  padding:14px;font-family:var(--font-mono);font-size:12px;word-break:break-all;
+  color:var(--warn);margin-bottom:10px;
+}
+.no-wallets{
+  text-align:center;color:var(--muted);font-size:13px;padding:18px 6px;
+  border:1px dashed var(--border-strong);border-radius:10px;
+}
+.no-wallets a{color:var(--cyan)}
+
+/* ---------- Toasts ---------- */
+#toasts{
+  position:fixed;bottom:20px;right:20px;z-index:100;
+  display:flex;flex-direction:column;gap:8px;max-width:min(360px,90vw);
+}
+.toast{
+  font-family:var(--font-mono);font-size:12.5px;padding:12px 16px;
+  border-radius:10px;background:var(--panel-hard);
+  border:1px solid var(--border-strong);color:var(--text);
+  box-shadow:0 10px 34px rgba(0,0,0,.5);
+  animation:toastIn .2s ease;
+}
+.toast.ok{border-color:rgba(20,241,149,.5)}
+.toast.err{border-color:rgba(255,84,112,.6);color:#ffd6de}
+.toast.warn{border-color:rgba(255,200,87,.55);color:#ffedcb}
+@keyframes toastIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
+.toast.out{opacity:0;transform:translateX(16px);transition:all .3s ease}
+
+/* ---------- Footer ---------- */
+.site-footer{
+  position:relative;z-index:10;border-top:1px solid var(--border);
+  padding:26px clamp(16px,6vw,80px);
+  display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted);
+}
+.site-footer a{color:var(--cyan);text-decoration:none}
+/* ---------- Landing FX (worldsfair v3) ---------- */
+.tw{
+  color:var(--cyan);font-weight:700;white-space:nowrap;
+  border-bottom:1px solid var(--border-strong);
+}
+.tw::after{
+  content:"";display:inline-block;width:2px;height:1em;margin-left:2px;
+  background:var(--cyan);vertical-align:-2px;animation:twCaret 1s steps(1) infinite;
+}
+@keyframes twCaret{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+.status-bar{
+  margin-top:34px;display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px 20px;
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);
+}
+.sb-title{color:var(--cyan);opacity:.85}
+.sb-item{display:inline-flex;align-items:center;gap:7px}
+.sb-dot{
+  width:7px;height:7px;border-radius:50%;background:var(--solana-green);flex:none;
+  box-shadow:0 0 0 0 rgba(20,241,149,.5);
+  animation:sbPulse 2.4s ease-out infinite;
+}
+@keyframes sbPulse{
+  0%{box-shadow:0 0 0 0 rgba(20,241,149,.55)}
+  70%{box-shadow:0 0 0 8px rgba(20,241,149,0)}
+  100%{box-shadow:0 0 0 0 rgba(20,241,149,0)}
+}
+
+.reveal{opacity:0;transform:translateY(26px);transition:opacity .7s ease,transform .7s ease}
+.reveal.in{opacity:1;transform:none}
+
+.wallet-btn img{width:16px;height:16px;border-radius:4px;margin-right:7px;vertical-align:-3px}
+.wallet-option .w-fallback{
+  width:28px;height:28px;border-radius:7px;flex:none;
+  display:inline-flex;align-items:center;justify-content:center;
+  background:var(--bg);border:1px solid var(--border-strong);
+  color:var(--cyan);font-family:var(--font-display);font-weight:700;font-size:14px;
+}
+.w-sec-label{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.2em;
+  text-transform:uppercase;color:var(--muted);margin:12px 0 8px;
+}
+.w-sec-label:first-child{margin-top:0}
+
+@media (prefers-reduced-motion:reduce){
+  .reveal{opacity:1;transform:none;transition:none}
+  .sb-dot{animation:none}
+  .tw::after{animation:none;opacity:0}
+  html{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+<canvas id="webgl-canvas" aria-hidden="true"></canvas>
+<div class="bg-fallback" aria-hidden="true"></div>
+<div class="crt-overlay" aria-hidden="true"></div>
+
+<header class="site-header">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true"></div>
+    <div>
+      <span class="brand-name">IPFPS <em>World's Fair</em></span>
+      <span class="brand-sub">web3 backend console</span>
+    </div>
+  </div>
+  <div class="view-switch" role="tablist" aria-label="View">
+    <button id="vsLanding" class="active" type="button">Fair</button>
+    <button id="vsConsole" type="button">Console</button>
+  </div>
+  <button id="walletBtn" class="wallet-btn" type="button">Connect wallet</button>
+</header>
+
+<main>
+  <!-- ================= LANDING ================= -->
+  <div id="view-landing" class="view active">
+    <section class="hero">
+      <div class="eyebrow">Global production network · Solana-native</div>
+      <h1>Instant Web3 Backend<br>for <span class="grad">AI Vibe-Coders</span></h1>
+      <p class="hero-sub">
+        One wallet signature spins up a dedicated backend for
+        <span class="tw" id="heroTw" data-words="a game|a mini-app|an AI tool|a marketplace">a game</span>:
+        its own users, balances, S2S API keys, Telegram bots and live feed — on the same
+        production network that already serves live products.
+      </p>
+      <div class="hero-cta">
+        <button id="heroCta" class="cta-primary" type="button">⚡ Launch Developer Console &amp; Get AI Spec →</button>
+        <button id="heroExplore" class="cta-secondary" type="button">explore the network ↓</button>
+      </div>
+      <div class="hero-meta">
+        <span>auth <b>solana signatures</b></span>
+        <span>api <b>s2s · 17 endpoints</b></span>
+        <span>realtime <b>edge ws</b></span>
+        <span>deploy <b>global prod</b></span>
+      </div>
+      <div class="status-bar" role="list" aria-label="Core network services">
+        <span class="sb-title">core services</span>
+        <span class="sb-item" role="listitem"><i class="sb-dot" aria-hidden="true"></i>S2S API</span>
+        <span class="sb-item" role="listitem"><i class="sb-dot" aria-hidden="true"></i>Solana Escrow</span>
+        <span class="sb-item" role="listitem"><i class="sb-dot" aria-hidden="true"></i>Edge WS</span>
+        <span class="sb-item" role="listitem"><i class="sb-dot" aria-hidden="true"></i>Webhooks</span>
+        <span class="sb-item" role="listitem"><i class="sb-dot" aria-hidden="true"></i>Shop</span>
+      </div>
+    </section>
+
+    <section class="section" id="how">
+      <div class="section-head">
+        <h2>How it works</h2>
+        <p>From zero to a live backend in three steps — no DevOps, no servers to manage.</p>
+      </div>
+      <div class="grid cols-3">
+        <div class="card hiw-step">
+          <span class="hiw-num">01</span>
+          <h3>Connect Wallet</h3>
+          <p>Sign one message with any Solana wallet. Your address is your account — no passwords, no email.</p>
+        </div>
+        <div class="card hiw-step">
+          <span class="hiw-num">02</span>
+          <h3>Get a Dedicated Backend in Seconds</h3>
+          <p>Your app gets its own isolated users, balances, API keys, webhooks and configuration on the production network.</p>
+        </div>
+        <div class="card hiw-step">
+          <span class="hiw-num">03</span>
+          <h3>Hand the Spec to Your AI Agent</h3>
+          <p>Download the machine-readable agent spec, paste it into any coding agent, and let it integrate the API for you.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="showcase">
+      <div class="section-head">
+        <h2>Live on the network</h2>
+        <p>Real products running on the IPFPS Global production contour today.</p>
+      </div>
+      <div class="grid cols-3">
+        <div class="card">
+          <h3>ludamax <span class="tag">Live · Global prod</span></h3>
+          <p>Skill-gaming arcade. Web3-first profiles, squads and live lobbies, with live Solana USDC deposits.</p>
+        </div>
+        <div class="card">
+          <h3>folderz <span class="tag">Live · Global prod</span></h3>
+          <p>Native Android storage app. Vault files on S3-backed object storage with quota leases.</p>
+        </div>
+        <div class="card">
+          <h3>pool <span class="tag">Live · Global prod</span></h3>
+          <p>Community pool app with open registration — onboarded straight through this console.</p>
+        </div>
+        <div class="card">
+          <h3>heartui <span class="tag">Live · Global prod</span></h3>
+          <p>Browser extension shop. Serves its UI from a chrome-extension origin through per-app CORS configuration.</p>
+        </div>
+        <div class="card">
+          <h3>tusslepuffs <span class="tag">Live · Global prod</span></h3>
+          <p>S2S-only WebGL game. Users, balances and score pushed over the signed tenant API — no frontend on our hosts.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="capabilities">
+      <div class="section-head">
+        <h2>What your app gets</h2>
+        <p>One console, the whole platform. Capabilities below are running in production — roadmap items are labelled.</p>
+      </div>
+      <div class="grid cols-3">
+        <div class="card">
+          <h3>S2S API</h3>
+          <p class="mono">17 endpoints</p>
+          <p>Users, balances (hold / settle / release / credit), score, referrals, products, purchases — HMAC-signed, app-pinned.</p>
+        </div>
+        <div class="card">
+          <h3>Solana escrow</h3>
+          <p>Per-app SOL and USDC deposit addresses with token policies and on-chain settlement.</p>
+        </div>
+        <div class="card">
+          <h3>Webhooks v1</h3>
+          <p>user.registered, deposit.confirmed, referral.linked — HMAC-signed envelopes pushed to your endpoint.</p>
+        </div>
+        <div class="card">
+          <h3>Shop digital goods</h3>
+          <p>Product catalogue and purchase ledger shared across the network, exposed over S2S.</p>
+        </div>
+        <div class="card">
+          <h3>TG bots per-app</h3>
+          <p>Bring your own bot token: Telegram auth and notifications scoped to your app only.</p>
+        </div>
+        <div class="card">
+          <h3>Referral graph</h3>
+          <p>Core-owned referral edges with source attribution. Rewards execute in your own backend — the graph stays neutral.</p>
+        </div>
+        <div class="card">
+          <h3>Live feed per-app</h3>
+          <p>Opt-out live feed ring, streamed to your users in real time over Edge WS.</p>
+        </div>
+        <div class="card">
+          <h3>Edge WS</h3>
+          <p>Realtime balances, chat and live feed terminated at the network edge, fanned out per app.</p>
+        </div>
+        <div class="card">
+          <h3>EVM · Base · Arbitrum · TON · Tempo <span class="tag roadmap">Roadmap</span></h3>
+          <p>Additional chains are on the roadmap — not available yet.</p>
+        </div>
+        <div class="card">
+          <h3>Ticketing <span class="tag roadmap">Private domain</span></h3>
+          <p>QR ticketing runs as a private domain today. Self-serve onboarding is on the roadmap.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="closing">
+      <p>Stop wasting time on backend plumbing. Build your frontend, feed the spec to your agent, and launch your live Web3 product today.</p>
+      <a href="#showcase">Explore the live showcase →</a>
+    </section>
+
+    <footer class="site-footer">
+      <span>ipfps · world's fair · web3 backend console</span>
+      <span>auth: solana signatures · sessions: 30-day jwt</span>
+    </footer>
+  </div>
+
+  <!-- ================= CONSOLE (authed) ================= -->
+  <div id="view-console" class="view">
+    <div class="console-wrap">
+      <aside class="console-side">
+        <div class="quota-banner">
+          Apps <b id="quotaUsed">–</b>/3
+          <span class="quota-note">Slots 2–3: coming with monetization.</span>
+        </div>
+        <div class="side-label">Your Apps</div>
+        <div id="tenantList"></div>
+        <div class="side-actions">
+          <button id="addTenantBtn" class="side-btn" type="button">+ Add app</button>
+        </div>
+      </aside>
+
+      <div class="console-main">
+        <nav class="tabs" role="tablist">
+          <button class="tab active" data-tab="overview" type="button" role="tab">Overview</button>
+          <button class="tab" data-tab="agent" type="button" role="tab">AI Agent Pack</button>
+          <button class="tab" data-tab="services" type="button" role="tab">Microservice Matrix</button>
+          <button class="tab" data-tab="config" type="button" role="tab">Settings</button>
+          <button class="tab" data-tab="activity" type="button" role="tab" id="tabActivity" hidden>Activity</button>
+        </nav>
+
+        <section class="panel active" id="panel-overview" role="tabpanel">
+          <div class="stat-grid" id="statGrid"></div>
+          <div id="tenantDetail"></div>
+        </section>
+
+        <section class="panel" id="panel-agent" role="tabpanel">
+          <h2>AI Agent Pack</h2>
+          <div class="block">
+            <h3>Agent spec</h3>
+            <p style="color:var(--muted);font-size:13px;margin-bottom:14px">
+              Hand the full integration contract to any coding agent.
+            </p>
+            <a class="dl-link" id="dlSpec" href="./IPFPS_AGENT_SPEC.md" download>Download Agent Spec</a>
+            <button class="mini-btn" id="copySpecUrl" type="button">Copy Spec URL</button>
+          </div>
+          <div class="block">
+            <h3>Minimal system prompt</h3>
+            <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
+              Generated for the selected app — paste it into your agent as-is.
+            </p>
+            <pre class="prompt-box" id="promptBox"></pre>
+            <button class="mini-btn" id="copyPrompt" type="button">Copy prompt</button>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-services" role="tabpanel">
+          <h2>Microservice Matrix</h2>
+          <div class="grid cols-3" id="servicesGrid"></div>
+        </section>
+
+        <section class="panel" id="panel-config" role="tabpanel">
+          <h2>Settings <span class="mono" id="cfgSlug" style="font-family:var(--font-mono);font-size:12px;color:var(--muted)"></span></h2>
+
+          <div class="block">
+            <h3>Access toggles</h3>
+            <div class="toggle-row">
+              <div>
+                <div class="t-title">Registration</div>
+                <div class="t-desc">Allow new users to register in this app.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="tglRegistration"><span class="track"></span></label>
+            </div>
+            <div class="toggle-row">
+              <div>
+                <div class="t-title">Solana auth</div>
+                <div class="t-desc">Wallet nonce / signature login for this app.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="tglSolana"><span class="track"></span></label>
+            </div>
+            <div class="toggle-row">
+              <div>
+                <div class="t-title">Live feed</div>
+                <div class="t-desc">Stream the live feed ring to your users over Edge WS.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="tglFeed"><span class="track"></span></label>
+            </div>
+            <div class="save-row">
+              <button class="mini-btn primary" id="saveToggles" type="button">Save toggles</button>
+            </div>
+          </div>
+
+          <div class="block">
+            <h3>Welcome bonus</h3>
+            <div class="form-row">
+              <div class="field" id="fWelcomeAmount">
+                <label for="welcomeAmount">Amount (0 = off)</label>
+                <input type="number" id="welcomeAmount" min="0" step="1" inputmode="numeric">
+                <div class="err">Amount must be a non-negative integer.</div>
+              </div>
+              <div class="field" id="fWelcomeCurrency">
+                <label for="welcomeCurrency">Currency (2–32: A–Z 0–9 _)</label>
+                <input type="text" id="welcomeCurrency" maxlength="32" placeholder="WP" autocomplete="off" spellcheck="false">
+                <div class="err">Amount &gt; 0 requires a currency code (e.g. WP).</div>
+              </div>
+            </div>
+            <p class="hint">Currency is required whenever amount is greater than zero.</p>
+            <div class="save-row">
+              <button class="mini-btn primary" id="saveWelcome" type="button">Save welcome bonus</button>
+            </div>
+          </div>
+
+          <div class="block">
+            <h3>Webhook endpoint</h3>
+            <div class="field" id="fWebhook">
+              <label for="webhookUrl">Webhook URL (https, empty = off)</label>
+              <input type="text" id="webhookUrl" placeholder="https://your-app.example.com/webhooks/ipfps" autocomplete="off" spellcheck="false">
+              <div class="err">Must be a valid https:// URL.</div>
+            </div>
+            <p class="hint">HMAC-signed envelopes (user.registered, deposit.confirmed, referral.linked) are POSTed to this URL.</p>
+            <div class="save-row">
+              <button class="mini-btn primary" id="saveWebhook" type="button">Save webhook</button>
+            </div>
+          </div>
+
+          <div class="block">
+            <h3>CORS origins</h3>
+            <div class="field">
+              <label for="corsOrigins">Allowed origins (one per line, exact scheme://host[:port])</label>
+              <textarea id="corsOrigins" placeholder="https://app.example.com" spellcheck="false"></textarea>
+            </div>
+            <div class="save-row">
+              <button class="mini-btn primary" id="saveCors" type="button">Save origins</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-activity" role="tabpanel">
+          <h2>Activity</h2>
+          <div id="activityBody"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ================= MODALS ================= -->
+<div class="modal-backdrop" id="walletModal">
+  <div class="modal">
+    <h3>Select a wallet</h3>
+    <p class="m-sub">Wallet Standard compatible Solana wallets detected in this browser.</p>
+    <div id="walletList"></div>
+    <div class="modal-actions">
+      <button class="mini-btn" data-close type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="createModal">
+  <div class="modal">
+    <h3>Create app</h3>
+    <p class="m-sub">An app is an isolated backend on the network: own users, balances, S2S keys and config.</p>
+    <div class="field">
+      <label for="ctName">Name</label>
+      <input type="text" id="ctName" maxlength="100" placeholder="My Game" autocomplete="off">
+    </div>
+    <div class="field" id="fCtSlug">
+      <label for="ctSlug">Slug</label>
+      <input type="text" id="ctSlug" maxlength="30" placeholder="my-game" autocomplete="off" spellcheck="false">
+      <div class="err">3–30 chars: lowercase letters, digits, dash — starts and ends with a letter or digit.</div>
+    </div>
+    <p class="hint" style="color:var(--muted);font-size:12px;margin-bottom:6px">
+      The slug becomes your app identity and demo host:
+      <span style="font-family:var(--font-mono);color:var(--cyan)" id="ctPreview">&lt;slug&gt;.demo.ipfps.org</span>
+    </p>
+    <div class="modal-actions">
+      <button class="mini-btn" data-close type="button">Cancel</button>
+      <button class="mini-btn primary" id="ctSubmit" type="button">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="secretModal">
+  <div class="modal">
+    <h3 id="secretTitle">Your S2S secret</h3>
+    <p class="m-sub" id="secretSub">Shown once — copy it now. The view is logged to the audit trail.</p>
+    <div class="secret-box" id="secretBox"></div>
+    <div class="kv-row">
+      <span class="kv-key">key id</span>
+      <span class="kv-val" id="secretKeyId"></span>
+    </div>
+    <div class="modal-actions">
+      <button class="mini-btn" id="copySecret" type="button">Copy secret</button>
+      <button class="mini-btn primary" data-close type="button">Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="./app.js?v=3" defer></script>
+</body>
+</html>
